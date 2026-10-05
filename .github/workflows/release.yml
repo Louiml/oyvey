@@ -1,28 +1,68 @@
 name: Release
 
-# Runs on a `v*` tag. The tag is the version: the asset names carry the
-# OS/arch suffix that `rak-setup` asks for, and the tag is recorded on the
-# release so a given build can be traced back to the commit that produced it.
+# Publishing is tag-driven: the tag is the version, and the release assets carry
+# the OS/arch suffix that `rak-setup` asks for.
+#
+# `workflow_dispatch` is kept for a re-publish of an existing tag, but it has to
+# name one. The upload action needs a tag that already exists, and a dispatch
+# runs on a branch -- dispatching with no tag used to fail at the upload step
+# with "GitHub Releases requires a tag" after several minutes of building.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.8.4). Empty uses the latest v* tag.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
+  resolve-tag:
+    name: resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.choose.outputs.tag }}
+    steps:
+      - name: Choose the tag
+        id: choose
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT="${{ inputs.tag }}"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [ -n "$INPUT" ]; then
+            TAG="$INPUT"
+          else
+            TAG="$(git ls-remote --tags --refs origin 'v*' \
+              | sed 's#.*refs/tags/##' | sort -V | tail -n1)"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::error::No tag to publish. Push a v* tag, or pass one as the 'tag' input."
+            exit 1
+          fi
+          echo "Publishing $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   linux:
     name: linux
+    needs: resolve-tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Test
-        # `--lib --tests`: doc-tests need rustdoc, which the minimal toolchain
-        # profile does not provide.
+        # `--lib --tests`: doc-tests need rustdoc, which the toolchain action
+        # does not guarantee, and including them would turn a missing component
+        # into a release failure.
         run: cargo test --lib --tests --no-fail-fast
       - name: Build
         run: cargo build --release --bin oyvey
@@ -31,6 +71,8 @@ jobs:
           ./target/release/oyvey --version
           ./target/release/oyvey help
           ./target/release/oyvey new smoke
+          cd smoke
+          ../target/release/oyvey list
       - name: Stage
         run: |
           set -e
@@ -41,12 +83,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: staging/oyvey-linux-x86_64
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
 
   windows:
     name: windows
+    needs: resolve-tag
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build
@@ -57,6 +103,9 @@ jobs:
           .\target\release\oyvey.exe --version
           .\target\release\oyvey.exe help
           .\target\release\oyvey.exe new smoke
+          Push-Location smoke
+          ..\target\release\oyvey.exe list
+          Pop-Location
       - name: Stage
         shell: pwsh
         run: |
@@ -66,3 +115,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: staging/oyvey-windows-x86_64.exe
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
