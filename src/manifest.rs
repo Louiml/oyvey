@@ -133,7 +133,38 @@ pub fn parse_manifest_str(content: &str) -> Result<Manifest, String> {
 }
 
 fn unquote(s: &str) -> String {
-    s.trim_end_matches(';').trim().trim_matches('"').to_string()
+    unescape(s.trim_end_matches(';').trim().trim_matches('"'))
+}
+
+/// Decode the string escapes a Rak literal may contain.
+///
+/// Needed because `write_manifest` escapes when it writes: a value containing a `"`
+/// has to be written `\"` or the file cannot be read back, and a parser that does
+/// not decode then round-trips the backslashes into the value -- which is worse than
+/// not escaping at all. This also means a hand-written manifest may use them.
+///
+/// An unknown escape passes through with the backslash dropped, matching the lexer's
+/// own handling, so a typo in a manifest does not make it unreadable.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Candidate entry points, most specific first, used when a manifest does not

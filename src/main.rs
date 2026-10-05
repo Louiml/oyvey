@@ -299,7 +299,7 @@ fn cmd_add(args: &[String]) -> Result<i32, anyhow::Error> {
     }
     let cache = Cache::open()?;
     let resolved = resolve_one(&cache, &dep)?;
-    let pkg_name = resolved.name.clone();
+    let pkg_name = manifest_key_for(&resolved)?;
 
     if manifest.deps.contains_key(&pkg_name) {
         println!("{} is already a dependency", pkg_name);
@@ -334,12 +334,18 @@ fn cmd_remove(args: &[String]) -> Result<i32, anyhow::Error> {
 
 /// Resolve a single dependency spec to a `Resolved` (used by `add` to learn
 /// the package name before recording it).
+/// Resolve a single spec and return *that package*, not just any package.
+///
+/// The synthetic manifest is keyed by the repo name, which is what the resolver
+/// walks in on, so the requested entry is found by matching the repo rather than by
+/// position. Taking `.next()` from the returned `BTreeMap` used to return the
+/// alphabetically-first entry, which for any package with a transitive dependency
+/// was the *dependency* -- so `oyvey add user/zebra-lib` could write
+/// `let deps = { aaa-lib: "user/zebra-lib" }` and corrupt the manifest.
 fn resolve_one(
     cache: &Cache,
     dep: &oyvey::spec::DepSpec,
 ) -> Result<oyvey::resolve::Resolved, anyhow::Error> {
-    // A one-off manifest with a single dep keyed by the repo name, so the
-    // resolver walks it and reports the package's declared name.
     let mut deps = std::collections::BTreeMap::new();
     deps.insert(dep.repo.clone(), dep_repo_string(dep));
     let synthetic = Manifest {
@@ -349,10 +355,60 @@ fn resolve_one(
     let lock = LockFile::default();
     let mut resolver = Resolver::new(cache, &lock);
     let resolved = resolver.resolve_root(&synthetic)?;
+    let names: Vec<String> = resolved.iter().map(|r| r.repo.clone()).collect();
     resolved
         .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve {}", dep.repo))
+        .find(|r| r.repo == dep.repo || r.name == dep.repo)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "resolved {} but did not find it in the result (resolved: {})",
+                dep.repo,
+                if names.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
+}
+
+/// The manifest key to record for a freshly added dependency.
+///
+/// This has to be something an `import` statement can name. The resolver keys its
+/// entries by the dep key it walked in on, so for `oyvey add user/rak-net` that is
+/// `"user/rak-net"` -- which contains a `-`, and `-` is a distinct token in the
+/// lexer, so no source file could ever reference it. The package's own declared name
+/// is both importable and what the package calls itself.
+///
+/// A package declaring an unusable name is reported rather than silently written: the
+/// alternative is a manifest entry that cannot be imported and cannot be removed by
+/// name either.
+fn manifest_key_for(resolved: &oyvey::resolve::Resolved) -> Result<String, anyhow::Error> {
+    let declared = resolved.manifest.name.trim().to_string();
+    if !is_rak_identifier(&declared) {
+        anyhow::bail!(
+            "{} declares the name '{}', which is not a usable import identifier. \
+             Add it under a valid name by hand: let deps = {{ your_name: \"{}\" }}",
+            resolved.repo,
+            declared,
+            resolved.repo
+        );
+    }
+    Ok(declared)
+}
+
+/// Whether `s` can be written as an identifier in an `import` statement.
+///
+/// Conservative on purpose: ASCII letters, digits and `_`, not starting with a
+/// digit. A dependency key is used both as a path segment and as an import target,
+/// so anything outside this set is rejected here rather than discovered later.
+fn is_rak_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn dep_repo_string(dep: &oyvey::spec::DepSpec) -> String {
@@ -852,29 +908,133 @@ fn rakc_path() -> Result<String, anyhow::Error> {
 }
 
 /// Serialize a manifest back to Rak source (used by add/remove).
+/// Rewrite only the `deps` block of `package.rak`, leaving everything else alone.
+///
+/// Surgical on purpose. The previous version regenerated the whole file from six
+/// hardcoded keys while `parse_manifest` recognises only those six and ignores
+/// everything else -- comments included. So one `oyvey add` permanently deleted
+/// `let authors`, `let repository`, `let keywords` and every `//` line in a manifest,
+/// with no warning. `package.rak` is Rak source, and it was being replaced by a lossy
+/// projection of itself.
+///
+/// A text edit is the only way to preserve parts of a file the tool does not fully
+/// model. If the file has no `deps` block, one is appended rather than synthesising
+/// the rest of the file.
 fn write_manifest(root: &Path, manifest: &Manifest) -> Result<(), anyhow::Error> {
-    let mut out = String::new();
-    out.push_str(&format!("let name = \"{}\"\n", manifest.name));
-    out.push_str(&format!("let version = \"{}\"\n", manifest.version));
-    if !manifest.description.is_empty() {
-        out.push_str(&format!("let description = \"{}\"\n", manifest.description));
-    }
-    if !manifest.license.is_empty() {
-        out.push_str(&format!("let license = \"{}\"\n", manifest.license));
-    }
-    out.push_str(&format!("let entry = \"{}\"\n", manifest.entry));
-    if manifest.deps.is_empty() {
-        out.push_str("let deps = {}\n");
-    } else {
-        out.push_str("let deps = {\n");
-        for (name, spec) in &manifest.deps {
-            out.push_str(&format!("    {}: \"{}\",\n", name, spec));
-        }
-        out.push_str("}\n");
-    }
     let path = root.join(MANIFEST_FILE);
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let block = render_deps_body(&manifest.deps);
+
+    let updated = match deps_block_span(&existing) {
+        Some((start, end)) => {
+            // Only the contents are replaced. The `let deps = {` prefix and the
+            // closing brace are already in the file, so pushing a whole statement
+            // here produced `let deps = {let deps = {` -- an unparseable manifest,
+            // written by the command whose job is to edit one.
+            let mut out = String::with_capacity(existing.len() + block.len());
+            out.push_str(&existing[..start]);
+            out.push_str(&block);
+            out.push_str(&existing[end..]);
+            out
+        }
+        None => {
+            // No `deps` statement at all. Append one whole, keeping the rest of the
+            // file byte-for-byte.
+            let mut out = existing.clone();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.is_empty() && !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push_str("let deps = {");
+            out.push_str(&block);
+            out.push_str("}\n");
+            out
+        }
+    };
+
+    std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// The byte range of the `deps` block's *contents*, so it can be replaced alone.
+///
+/// Matches `let deps = {` and the brace that closes it, tracking nesting so a
+/// dependency value containing `{` cannot end the block early. Returns `None` when
+/// there is no block.
+fn deps_block_span(src: &str) -> Option<(usize, usize)> {
+    let start = src.find("let deps")?;
+    let open = src[start..].find('{')? + start;
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open + 1, i));
+                }
+                i += 1;
+            }
+            // Skip a line comment: a brace in prose must not change the nesting.
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i += src[i..].find('\n').map(|n| i + n).unwrap_or(bytes.len());
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Render the *contents* of a `deps` block, without the surrounding braces.
+///
+/// The contents, not the whole statement: `deps_block_span` returns the span
+/// between the braces, so substituting a full `let deps = { ... }` into it produced
+/// `let deps = {let deps = {` -- an unparseable file, from a command whose entire
+/// job is to edit one.
+fn render_deps_body(deps: &std::collections::BTreeMap<String, String>) -> String {
+    if deps.is_empty() {
+        return "\n".to_string();
+    }
+    let mut out = String::from("\n");
+    for (name, spec) in deps {
+        // A key that is not a bare identifier has to be quoted, or the file we
+        // write cannot be read back. Hand-edited manifests contain such keys.
+        let key = if is_rak_identifier(name) {
+            name.clone()
+        } else {
+            format!("\"{}\"", escape_string(name))
+        };
+        out.push_str(&format!("    {}: \"{}\",\n", key, escape_string(spec)));
+    }
+    out
+}
+
+/// Escape a value for a Rak string literal.
+///
+/// The old writer did no escaping at all, so a `"` in a description or a dependency
+/// spec produced a file that could not be parsed back -- a corrupt manifest caused by
+/// running a command that was supposed to edit one.
+fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -900,5 +1060,171 @@ mod tests {
         assert!(require_arg(&[], "usage").is_err());
         assert!(require_arg(&["--flag".to_string()], "usage").is_err());
         assert_eq!(require_arg(&["x".to_string()], "usage").unwrap(), "x");
+    }
+
+    /// A manifest as a user would actually write one: a leading comment, keys the
+    /// tool does not model, and no explicit `entry`.
+    const RICH_MANIFEST: &str = r#"// Rak package manifest
+let name = "demo"
+let version = "0.1.0"
+let description = "a demo"
+let license = "MIT"
+let authors = ["someone"]
+let repository = "https://example.invalid/repo"
+let keywords = { demo = "yes" }
+"#;
+
+    fn write_to(root: &Path, source: &str, deps: &[(&str, &str)]) -> String {
+        std::fs::write(root.join(MANIFEST_FILE), source).expect("seed manifest");
+        let mut m = Manifest {
+            name: "demo".to_string(),
+            ..Default::default()
+        };
+        for (k, v) in deps {
+            m.deps.insert(k.to_string(), v.to_string());
+        }
+        write_manifest(root, &m).expect("write manifest");
+        std::fs::read_to_string(root.join(MANIFEST_FILE)).expect("read back")
+    }
+
+    /// The rewrite must not delete a comment or a key it does not model.
+    ///
+    /// This is the data loss: the old writer emitted six fixed lines and dropped
+    /// everything else, so one `oyvey add` destroyed `authors`, `repository`,
+    /// `keywords` and every `//` line in the file.
+    #[test]
+    fn rewrite_preserves_comments_and_unknown_keys() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_manifest_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let out = write_to(&tmp, RICH_MANIFEST, &[("net", "user/rak-net")]);
+
+        for line in [
+            "// Rak package manifest",
+            "let authors = [\"someone\"]",
+            "let repository = \"https://example.invalid/repo\"",
+            "let keywords = { demo = \"yes\" }",
+        ] {
+            assert!(out.contains(line), "{} was deleted:\n{}", line, out);
+        }
+        assert!(
+            out.contains("net: \"user/rak-net\""),
+            "dep missing:\n{}",
+            out
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A manifest with no `entry` must not gain one.
+    ///
+    /// `Manifest::default` supplies `ENTRY_DEFAULT`, so the old writer always emitted
+    /// `let entry = "src/main.rak"`. That pinned a package relying on the documented
+    /// entry-inference order to one specific file, because of an unrelated
+    /// `oyvey add`.
+    #[test]
+    fn rewrite_does_not_invent_an_entry_line() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_entry_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let out = write_to(&tmp, RICH_MANIFEST, &[("net", "user/rak-net")]);
+        assert!(
+            !out.contains("let entry"),
+            "the rewrite invented an `entry` line:\n{}",
+            out
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A quote in a value must not produce a file that cannot be read back.
+    #[test]
+    fn rewrite_escapes_quotes_in_values() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_escape_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let out = write_to(&tmp, RICH_MANIFEST, &[("weird", "a \"quoted\" value")]);
+        assert!(
+            out.contains("weird: \"a \\\"quoted\\\" value\""),
+            "value not escaped:\n{}",
+            out
+        );
+        // The round trip is the real assertion: it has to parse.
+        let parsed =
+            oyvey::manifest::parse_manifest(&tmp.join(MANIFEST_FILE)).expect("must reparse");
+        assert_eq!(
+            parsed.deps.get("weird").map(String::as_str),
+            Some("a \"quoted\" value")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Everything outside `deps` must come back byte-identical.
+    #[test]
+    fn rewrite_leaves_the_rest_of_the_file_untouched() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_bytes_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let src = "let name = \"demo\"\nlet deps = {\n}\n\n// trailing comment\nlet entry = \"src/main.rak\"\n";
+        let out = write_to(&tmp, src, &[("net", "user/rak-net")]);
+        let expected = "let name = \"demo\"\nlet deps = {\n    net: \"user/rak-net\",\n}\n\n// trailing comment\nlet entry = \"src/main.rak\"\n";
+        assert_eq!(out, expected);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A manifest with no `deps` block gets one appended, keeping the rest.
+    #[test]
+    fn rewrite_appends_a_deps_block_when_absent() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_nodeps_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let out = write_to(
+            &tmp,
+            "// only a comment\nlet name = \"demo\"\n",
+            &[("net", "user/rak-net")],
+        );
+        assert!(out.contains("// only a comment"), "comment lost:\n{}", out);
+        assert!(
+            out.contains("let deps = {"),
+            "deps block not appended:\n{}",
+            out
+        );
+        assert!(
+            out.contains("net: \"user/rak-net\""),
+            "dep missing:\n{}",
+            out
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A key that is not a bare identifier has to be quoted, or the file we write
+    /// cannot be read back.
+    #[test]
+    fn rewrite_quotes_awkward_dependency_keys() {
+        let tmp = std::env::temp_dir().join(format!("oyvey_awkward_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let out = write_to(&tmp, RICH_MANIFEST, &[("user/rak-net", "user/rak-net")]);
+        assert!(
+            out.contains("\"user/rak-net\": \"user/rak-net\""),
+            "an awkward key must be quoted:\n{}",
+            out
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A brace inside a comment must not end the `deps` block early.
+    #[test]
+    fn deps_block_span_ignores_braces_in_comments() {
+        let src = "let deps = {\n    // a brace } in prose\n    net: \"user/rak-net\",\n}\nlet entry = \"src/main.rak\"\n";
+        let (start, end) = deps_block_span(src).expect("span");
+        assert_eq!(
+            &src[start..end],
+            "\n    // a brace } in prose\n    net: \"user/rak-net\",\n"
+        );
+    }
+
+    /// Dependency keys must be things an `import` can name.
+    #[test]
+    fn is_rak_identifier_accepts_only_importable_names() {
+        assert!(is_rak_identifier("net"));
+        assert!(is_rak_identifier("_private"));
+        assert!(is_rak_identifier("mylib2"));
+        assert!(!is_rak_identifier("user/rak-net"), "contains - and /");
+        assert!(!is_rak_identifier("2fast"), "starts with a digit");
+        assert!(!is_rak_identifier(""));
+        assert!(!is_rak_identifier("has space"));
     }
 }
