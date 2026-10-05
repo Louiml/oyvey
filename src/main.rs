@@ -471,6 +471,39 @@ fn lockfile_from_resolved(resolved: &[oyvey::resolve::Resolved]) -> LockFile {
 // build / run / test
 // ---------------------------------------------------------------------------
 
+/// Arguments for the child, after `oyvey run` / `oyvey build`.
+///
+/// Passed through verbatim, including a leading `--`. That separator has to reach
+/// rakc rather than be consumed here: rakc is what decides which arguments are
+/// flags, and it only stops at `--`. Stripping it here meant
+/// `oyvey run -- --port 8080` reached rakc as `run <entry> --port 8080`, so rakc
+/// claimed `--port` as its own and the program received `[8080]`.
+///
+/// `--help` and `-h` are consumed by the caller before this runs, so they are not
+/// special cased here: forwarding a program's own `--help` is the caller's
+/// decision.
+fn child_args(args: &[String]) -> Vec<String> {
+    args.to_vec()
+}
+
+/// The child's exit code, treating death by signal as a failure rather than
+/// success.
+///
+/// `ExitStatus::code()` is `None` when a process is killed by a signal, so
+/// `unwrap_or(0)` turned a segfault or an OOM kill into exit code 0 -- in CI that
+/// reads as "the tests passed" for a program that crashed. Cargo reports
+/// `128 + signal` on Unix; there is no portable equivalent, so this reports the
+/// fact and fails.
+fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
+    match status.code() {
+        Some(code) => code,
+        None => {
+            eprintln!("oyvey: the child process was terminated by a signal");
+            1
+        }
+    }
+}
+
 fn cmd_build(args: &[String]) -> Result<i32, anyhow::Error> {
     if let Some(a) = args.first() {
         if a == "--help" || a == "-h" {
@@ -492,8 +525,11 @@ fn cmd_build(args: &[String]) -> Result<i32, anyhow::Error> {
     let rakc = rakc_path()?;
     // rakc already prints `Built: <path>` and the embedded-source size, so
     // oyvey does not repeat it here.
-    let status = invoke_rakc(&root, &rakc, &["build".to_string(), entry.clone()])?;
-    Ok(status.code().unwrap_or(0))
+    // Forwarded so a flag aimed at rakc reaches it instead of being dropped.
+    let mut argv = vec!["build".to_string(), entry.clone()];
+    argv.extend(child_args(args));
+    let status = invoke_rakc(&root, &rakc, &argv)?;
+    Ok(exit_code_of(&status))
 }
 
 fn cmd_run(args: &[String]) -> Result<i32, anyhow::Error> {
@@ -515,8 +551,13 @@ fn cmd_run(args: &[String]) -> Result<i32, anyhow::Error> {
         );
     }
     let rakc = rakc_path()?;
-    let status = invoke_rakc(&root, &rakc, &["run".to_string(), entry.clone()])?;
-    Ok(status.code().unwrap_or(0))
+    // The program's own arguments. Without this, `fn main(argv)` in every
+    // `oyvey new` project always received an empty array -- which is exactly what
+    // oyvey's own scaffold template and `docs/content/cli.md` promise it gets.
+    let mut argv = vec!["run".to_string(), entry.clone()];
+    argv.extend(child_args(args));
+    let status = invoke_rakc(&root, &rakc, &argv)?;
+    Ok(exit_code_of(&status))
 }
 
 fn cmd_test(args: &[String]) -> Result<i32, anyhow::Error> {
@@ -570,7 +611,7 @@ fn cmd_test(args: &[String]) -> Result<i32, anyhow::Error> {
         forward.extend(files);
     }
     let status = invoke_rakc(&root, &rakc, &forward)?;
-    Ok(status.code().unwrap_or(0))
+    Ok(exit_code_of(&status))
 }
 
 /// Make sure dependencies are resolved and vendored. Skips network when the

@@ -241,3 +241,98 @@ fn remove_reports_an_unknown_dependency() {
     assert!(!o.status.success());
     assert!(stderr(&o).contains("not a dependency"));
 }
+
+/// Is a `rakc` usable from PATH?
+///
+/// The argument-forwarding tests below cannot run without one, and a missing
+/// compiler is not the failure they are about.
+fn rakc_available() -> bool {
+    Command::new(if cfg!(windows) { "rakc.exe" } else { "rakc" })
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Build a project whose `main` reports the argv it received.
+fn scaffold_echo_argv(dir: &Path, tag: &str) -> PathBuf {
+    let out = run(dir, dir, &["new", tag]);
+    assert!(out.status.success(), "oyvey new failed: {}", stderr(&out));
+    let project = dir.join(tag);
+    let main_path = project.join("src").join("main.rak");
+    std::fs::write(
+        &main_path,
+        "fn main(argv) -> int {\n  dump argv\n  return 0\n}\n",
+    )
+    .expect("write main.rak");
+    project
+}
+
+/// `oyvey run` must hand the program's own arguments to the program.
+///
+/// It dropped them entirely: the argv passed to rakc was always exactly
+/// `["run", <entry>]`.
+#[test]
+fn run_forwards_arguments_to_the_program() {
+    if !rakc_available() {
+        eprintln!("skipping: rakc is not on PATH");
+        return;
+    }
+    let tmp = Tmp::new("runargs");
+    let project = scaffold_echo_argv(tmp.path(), "echoargs");
+
+    let out = run(&project, tmp.path(), &["run", "alpha", "beta"]);
+    assert!(out.status.success(), "oyvey run failed: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("[alpha, beta]"),
+        "the program did not receive its arguments; stdout: {}",
+        stdout(&out)
+    );
+}
+
+/// A `--` separator must survive to rakc, which is what enforces it.
+///
+/// oyvey used to strip it, so `oyvey run -- --port 8080` reached rakc as
+/// `run <entry> --port 8080` and rakc claimed `--port` as its own flag. The program
+/// then received `[8080]`.
+#[test]
+fn run_passes_the_separator_through_so_flags_reach_the_program() {
+    if !rakc_available() {
+        eprintln!("skipping: rakc is not on PATH");
+        return;
+    }
+    let tmp = Tmp::new("runsep");
+    let project = scaffold_echo_argv(tmp.path(), "echosep");
+
+    let out = run(&project, tmp.path(), &["run", "--", "--port", "8080"]);
+    assert!(out.status.success(), "oyvey run failed: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("[--port, 8080]"),
+        "flag-shaped arguments were eaten before reaching the program; stdout: {}",
+        stdout(&out)
+    );
+}
+
+/// The program's exit code is oyvey's exit code.
+#[test]
+fn run_propagates_the_programs_exit_code() {
+    if !rakc_available() {
+        eprintln!("skipping: rakc is not on PATH");
+        return;
+    }
+    let tmp = Tmp::new("runexit");
+    let project = scaffold_echo_argv(tmp.path(), "echoexit");
+    std::fs::write(
+        project.join("src").join("main.rak"),
+        "fn main(argv) -> int {\n  return 42\n}\n",
+    )
+    .expect("write main.rak");
+
+    let out = run(&project, tmp.path(), &["run"]);
+    assert_eq!(
+        out.status.code(),
+        Some(42),
+        "expected the program's exit code; stderr: {}",
+        stderr(&out)
+    );
+}
