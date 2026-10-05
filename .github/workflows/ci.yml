@@ -85,16 +85,27 @@ jobs:
       - name: Build the release binary
         run: cargo build --release --bin oyvey
 
-      - name: Verify the produced binary is hardened
-        # The flags live in .cargo/config.toml. A linker flag is only a
-        # claim: this reads the produced PE back and asserts the
-        # DllCharacteristics bits and the CFG load config, so a typo in
-        # that file cannot ship a soft binary. The first published oyvey
-        # had no CFG precisely because the standalone repository started
-        # without a .cargo/config.toml and nothing checked.
+      # The flags live in .cargo/config.toml. A linker flag is only a
+      # claim: this reads the produced binary back and asserts the
+      # DllCharacteristics bits and the CFG load config, so a typo in
+      # that file cannot ship a soft binary. The first published oyvey
+      # had no CFG precisely because the standalone repository started
+      # without a .cargo/config.toml and nothing checked.
+      #
+      # Split per OS because the executable is `oyvey.exe` on Windows and
+      # `oyvey` elsewhere; one step naming the wrong one fails with a bare
+      # FileNotFoundError instead of a hardening verdict.
+      - name: Verify the produced binary is hardened (unix)
+        if: runner.os != 'Windows'
         run: |
           python verify_hardening.py --self-test
           python verify_hardening.py target/release/oyvey
+
+      - name: Verify the produced binary is hardened (windows)
+        if: runner.os == 'Windows'
+        run: |
+          python verify_hardening.py --self-test
+          python verify_hardening.py target\release\oyvey.exe
       # Invoked by path, not by name: the binary lives in target/release
       # and is not on PATH, so a bare `oyvey` dies with "command not
       # found". This checks the executable that is actually shipped -- that
