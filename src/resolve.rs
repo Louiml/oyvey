@@ -22,7 +22,7 @@ use crate::cache::Cache;
 use crate::git;
 use crate::lock::LockFile;
 use crate::manifest::{parse_manifest, Manifest, MANIFEST_FILE};
-use crate::spec::{parse_dep_spec, version_satisfies, DepSpec};
+use crate::spec::{check_version, parse_dep_spec, DepSpec};
 
 /// A fully resolved package.
 #[derive(Clone, Debug)]
@@ -152,7 +152,13 @@ impl<'a> Resolver<'a> {
             };
             if locked_base == url
                 && !locked_rev.is_empty()
-                && version_satisfies(&entry.version, spec.constraint.as_deref().unwrap_or(""))
+                // A locked entry whose version no longer parses cannot be
+                // reused either way, so a false here just means re-resolve.
+                && check_version(
+                    &entry.version,
+                    spec.constraint.as_deref().unwrap_or(""),
+                )
+                .unwrap_or(false)
             {
                 return Ok(locked_rev.to_string());
             }
@@ -166,11 +172,27 @@ impl<'a> Resolver<'a> {
         let constraint = spec.constraint.as_deref().unwrap_or("");
         let tags =
             git::list_tags(&db).with_context(|| format!("listing tags for {}", spec.repo))?;
-        if let Some(tag) = tags
+        // Validate the constraint once, before scanning tags, so an
+        // unparseable one is reported as such rather than as "no matching
+        // version" -- which points the reader at the wrong problem.
+        if !constraint.is_empty() && constraint != "*" {
+            if let Err(why) = check_version("0.0.0", constraint) {
+                bail!(
+                    "{}: invalid version constraint '{}': {}",
+                    spec.repo,
+                    constraint,
+                    why
+                );
+            }
+        }
+
+        let found = tags
             .iter()
-            .find(|t| version_satisfies(t.trim_start_matches('v'), constraint))
-        {
-            return Ok(tag.clone());
+            .find(|t| check_version(t.trim_start_matches('v'), constraint).unwrap_or(false))
+            .cloned();
+
+        if let Some(tag) = found {
+            return Ok(tag);
         }
         if constraint.is_empty() || constraint == "*" {
             return git::head_rev(&db).with_context(|| format!("resolving HEAD for {}", spec.repo));

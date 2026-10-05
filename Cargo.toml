@@ -23,3 +23,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "oyvey"
 path = "src/main.rs"
+
+# oyvey is its own package. It is kept in a directory that happens to sit inside
+# another Rust workspace, and without this Cargo walks up, finds that workspace,
+# and refuses to build. An empty table makes this the workspace root.
+[workspace]
