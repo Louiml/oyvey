@@ -84,10 +84,26 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Build the release binary
         run: cargo build --release --bin oyvey
-      - name: Smoke-test the binary
+      # Invoked by path, not by name: the binary lives in target/release
+      # and is not on PATH, so a bare `oyvey` dies with "command not
+      # found". This checks the executable that is actually shipped -- that
+      # it starts, reports a version, and can scaffold a project.
+      - name: Smoke-test the binary (unix)
+        if: runner.os != 'Windows'
         run: |
-          oyvey --version
-          oyvey help
-          oyvey new smoke
+          ./target/release/oyvey --version
+          ./target/release/oyvey help
+          ./target/release/oyvey new smoke
           cd smoke
-          oyvey list
+          ../target/release/oyvey list
+
+      - name: Smoke-test the binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\target\release\oyvey.exe --version
+          .\target\release\oyvey.exe help
+          .\target\release\oyvey.exe new smoke
+          Push-Location smoke
+          ..\target\release\oyvey.exe list
+          Pop-Location
