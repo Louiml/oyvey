@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release --bin oyvey
+      - name: Stage
+        run: |
+          mkdir -p staging
+          cp target/release/oyvey staging/oyvey-linux-x86_64
+          chmod +x staging/oyvey-linux-x86_64
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/oyvey-linux-x86_64
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin oyvey
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target\release\oyvey.exe staging\oyvey-windows-x86_64.exe
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/oyvey-windows-x86_64.exe

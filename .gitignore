@@ -1,0 +1,14 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Built executables land next to the entry point (`src/main.rak` -> `src/main`)
+/src/main
+/src/main.exe
+/src/lib
+/src/lib.exe
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
