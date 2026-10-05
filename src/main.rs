@@ -478,7 +478,12 @@ fn cmd_lock(args: &[String]) -> Result<i32, anyhow::Error> {
 /// Resolve + vendor + write the lockfile. `update` ignores locked revisions.
 fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
     let manifest = load_manifest(root)?;
-    let existing = load_lock(root).unwrap_or_default();
+    // Propagated, not defaulted: a present-but-unreadable lockfile is an error by
+    // `load_lock`'s own contract. Defaulting here meant a truncated or
+    // merge-conflicted lock silently re-resolved to newest and was then overwritten,
+    // destroying the reproducibility record -- which is what Cargo's `--locked`
+    // exists to prevent.
+    let existing = load_lock(root)?;
     let cache = Cache::open()?;
 
     // For a plain install, reuse the lockfile's revisions (reproducible).
@@ -672,19 +677,50 @@ fn cmd_test(args: &[String]) -> Result<i32, anyhow::Error> {
 
 /// Make sure dependencies are resolved and vendored. Skips network when the
 /// lockfile is fresh and every package is already vendored.
+/// Make sure dependencies are resolved and vendored. Skips the network when the
+/// lockfile still satisfies the manifest and every locked package is on disk.
 fn ensure_deps(root: &Path) -> Result<(), anyhow::Error> {
     let manifest = load_manifest(root)?;
-    let lock = load_lock(root).unwrap_or_default();
-    let fresh = !manifest.deps.is_empty()
-        && manifest.deps.keys().all(|d| lock.get(d).is_some())
-        && manifest
-            .deps
-            .keys()
-            .all(|d| packages_dir(root).join(d).exists());
-    if fresh {
+    let lock = load_lock(root)?;
+    if lock_is_usable(root, &manifest, &lock) {
         return Ok(());
     }
     install(root, false)
+}
+
+/// Whether the lockfile and `packages/` still satisfy the manifest.
+///
+/// The previous check looked only at whether each direct dependency was *present by
+/// name*. It never re-checked that the locked version still satisfied the manifest's
+/// constraint, so editing `net: "user/rak-net@^1.0"` to `^2.0` and running
+/// `oyvey build` silently built against 1.x -- nothing printed, no exit code, and no
+/// reason to suspect anything. It also examined only direct dependencies, so a
+/// deleted *transitive* one surfaced later as a compiler error in the user's own
+/// code, which blames them for oyvey's staleness check.
+///
+/// So the constraints are re-checked here, exactly as `Resolver::resolve_rev` does,
+/// and the whole locked set has to still be vendored.
+fn lock_is_usable(root: &Path, manifest: &Manifest, lock: &LockFile) -> bool {
+    for (name, spec) in &manifest.deps {
+        let Some(entry) = lock.get(name) else {
+            return false;
+        };
+        let constraint = match parse_dep_spec(spec).constraint {
+            Some(c) if !c.is_empty() && c != "*" => c,
+            // An unconstrained dependency is satisfied by whatever is locked.
+            _ => continue,
+        };
+        match oyvey::spec::check_version(&entry.version, &constraint) {
+            Ok(true) => {}
+            // A version that no longer parses, or one that no longer matches, both
+            // mean the lock is stale for this constraint.
+            Ok(false) | Err(_) => return false,
+        }
+    }
+    // Every locked package, not just the direct ones, must still be vendored.
+    lock.package
+        .iter()
+        .all(|e| packages_dir(root).join(&e.name).is_dir())
 }
 
 /// Invoke rakc with CWD = project root and RAK_PATH pointing at the vendored

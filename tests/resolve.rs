@@ -472,3 +472,160 @@ fn checksum_detects_tampering() {
     let bad = sha256_file(&vendored);
     assert_ne!(bad, good, "checksum should detect the edit");
 }
+
+/// Run `f` with `git` removed from `PATH`.
+///
+/// This is how the offline behaviour is proven rather than asserted. The bug was an
+/// ordering mistake -- `ensure_checkout` called the fetch before checking whether the
+/// checkout was already on disk -- and only an actual absence of `git` distinguishes
+/// that from code that merely looks right.
+fn without_git<T>(f: impl FnOnce() -> T) -> T {
+    let saved = std::env::var("PATH").unwrap_or_default();
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let stripped = saved
+        .split(sep)
+        .filter(|p| {
+            let low = p.to_ascii_lowercase();
+            // Keep everything that is not a git install directory.
+            !(low.contains("git") && (low.contains("bin") || low.contains("cmd")))
+        })
+        .collect::<Vec<_>>()
+        .join(&sep.to_string());
+    assert_ne!(
+        stripped, saved,
+        "the PATH filter removed nothing; cannot test offline"
+    );
+    std::env::set_var("PATH", &stripped);
+    let out = f();
+    std::env::set_var("PATH", saved);
+    out
+}
+
+/// A second resolve must not need `git` once everything is vendored.
+///
+/// The README claimed a resolved project "works offline", and it did not:
+/// `ensure_checkout` called `ensure_db` -- which fetches unconditionally -- *before*
+/// checking whether the checkout was already on disk. So `install`, `update`, `add`
+/// and `lock` all failed on an air-gapped machine with a fully populated cache.
+#[test]
+fn resolving_again_needs_no_git() {
+    let w = World::new("offline");
+    let pkg = w._tmp.path().join("repos").join("mydep");
+    make_package(&pkg, "mydep", "1.0.0", &[("v1.0.0", "1.0.0")]);
+    let url = url_for(&pkg);
+
+    let (resolved, lock) = w.install_url(&[("mydep", &url, "")]);
+    assert_eq!(resolved.len(), 1);
+    vendor_packages(&w.root, &resolved).expect("vendor");
+    oyvey::lock::save_lock(&w.root.join("oyvey.lock"), &lock).expect("write lock");
+    assert!(
+        packages_dir(&w.root).join("mydep").is_dir(),
+        "the package should be vendored before the offline run"
+    );
+
+    // With `git` unreachable, resolving the same lockfile must still succeed: the
+    // checkouts are all on disk.
+    let manifest = w.manifest("root", &[("mydep", &url)]);
+    let cache = Cache::open_at(w._tmp.path().join("cache")).expect("reopen cache");
+    let again = without_git(|| {
+        let mut r = Resolver::new(&cache, &lock);
+        r.resolve_root(&manifest)
+            .map(|_| ())
+            .map_err(|e| format!("{:#}", e))
+    });
+    again.expect("a warm cache must resolve with no git at all");
+}
+
+/// A checkout already on disk must be returned without touching the network.
+///
+/// The narrow half of the offline behaviour. Uses a rev that does not exist
+/// anywhere, so the only way to succeed is to return the path that is already there.
+#[test]
+fn an_existing_checkout_is_reused_without_the_db() {
+    let w = World::new("reuse");
+    let pkg = w._tmp.path().join("repos").join("mydep");
+    make_package(&pkg, "mydep", "1.0.0", &[("v1.0.0", "1.0.0")]);
+    let url = url_for(&pkg);
+
+    let checkout = w
+        .cache
+        .ensure_checkout(&url, "v1.0.0")
+        .expect("first checkout");
+    assert!(checkout.join("package.rak").is_file());
+
+    // Same rev, no git reachable. This is the property that matters: the reuse
+    // check is keyed on the rev, which is right -- a *different* rev is a different
+    // cache entry and does have to be exported.
+    let again = without_git(|| {
+        w.cache
+            .ensure_checkout(&url, "v1.0.0")
+            .map_err(|e| format!("{:#}", e))
+    });
+    let again = again.expect("a checkout that is already on disk must not need git");
+    assert_eq!(again, checkout);
+    assert!(again.join("package.rak").is_file());
+}
+
+/// A db directory left by an interrupted clone must not brick the cache.
+///
+/// `git clone` creates the destination directory before transferring anything, so a
+/// Ctrl-C or a dropped connection leaves one with no repository inside.
+/// `clone_bare` refuses to write into an existing directory, which used to make that
+/// state permanent: every later run failed with "cache db already exists" and the
+/// only way out was to delete `~/.oyvey` by hand.
+#[test]
+fn an_incomplete_clone_is_replaced_rather_than_fatal() {
+    let w = World::new("broken");
+    let pkg = w._tmp.path().join("repos").join("mydep");
+    make_package(&pkg, "mydep", "1.0.0", &[("v1.0.0", "1.0.0")]);
+    let url = url_for(&pkg);
+
+    // The shape an interrupted clone leaves behind: the directory exists, the repo
+    // does not.
+    let db = w.cache.db_dir(&url);
+    std::fs::create_dir_all(&db).expect("create a bogus db dir");
+    std::fs::write(db.join("leftover"), "junk").expect("leftover file");
+    assert!(
+        !oyvey::git::is_git_dir(&db).expect("probe the fixture"),
+        "the fixture must not be a git repository"
+    );
+
+    let got = w
+        .cache
+        .ensure_db(&url)
+        .expect("ensure_db must recover from an incomplete clone");
+    assert!(
+        oyvey::git::is_git_dir(&got).expect("probe db"),
+        "the cache should hold a usable repository after recovery"
+    );
+}
+
+/// A lockfile that cannot be parsed must be an error, not a silent reset.
+///
+/// `load_lock` documents that a present-but-unreadable file is an error, and then
+/// both of its callers in `main.rs` overrode it with `.unwrap_or_default()`. A
+/// truncated or merge-conflicted lock therefore re-resolved to newest and was then
+/// overwritten, destroying the reproducibility record -- which is what Cargo's
+/// `--locked` exists to prevent. `cmd_list` already propagated it, so the crate
+/// disagreed with itself.
+#[test]
+fn a_missing_lockfile_is_empty_and_a_broken_one_is_an_error() {
+    let tmp = Tmp::new("badlock");
+    let path = tmp.path().join("oyvey.lock");
+
+    // The normal first-run case: nothing locked yet.
+    assert!(
+        oyvey::lock::load_lock(&path)
+            .expect("a missing lockfile is not an error")
+            .package
+            .is_empty(),
+        "a missing lockfile should read as 'nothing locked yet'"
+    );
+
+    // A present-but-unreadable one must be reported, not swallowed.
+    std::fs::write(&path, "{ this is not valid toml").expect("write");
+    assert!(
+        oyvey::lock::load_lock(&path).is_err(),
+        "an unparseable lockfile must be an error, not an empty lock"
+    );
+}

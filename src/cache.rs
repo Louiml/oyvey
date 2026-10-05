@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::git;
 use crate::OYVEY_HOME_ENV;
@@ -73,22 +73,58 @@ impl Cache {
     /// path. Clones on first use, fetches otherwise.
     pub fn ensure_db(&self, url: &str) -> Result<PathBuf> {
         let db = self.db_dir(url);
-        if db.join("HEAD").exists() {
+        if self.db_is_usable(&db) {
             git::fetch(&db)?;
         } else {
+            // A db directory git does not recognise is left over from a clone that
+            // never finished: `git clone` creates the destination *before* it
+            // transfers anything, so an interrupt, a dropped connection or a full
+            // disk leaves one behind. `clone_bare` refuses to write into an existing
+            // directory, which used to make that state permanent -- every later run
+            // failed with "cache db already exists" and the only way out was to
+            // delete `~/.oyvey` by hand.
+            //
+            // Removing it is safe and is the only thing that un-bricks the cache:
+            // the path is inside our own cache root and holds a clone of a public
+            // repository that can simply be fetched again.
+            if db.exists() {
+                std::fs::remove_dir_all(&db).with_context(|| {
+                    format!(
+                        "removing the unusable cache db at {} (a previous clone did \
+                         not finish); delete it by hand if this persists",
+                        db.display()
+                    )
+                })?;
+            }
             git::clone_bare(url, &db)?;
         }
         Ok(db)
     }
 
+    /// Whether `db` is a git repository git is willing to work with.
+    ///
+    /// Asks git rather than probing the filesystem for `HEAD`. A bare repository
+    /// keeps `HEAD` inside its git directory, so the old check was right only by
+    /// accident, and it could not tell a finished clone from an interrupted one.
+    fn db_is_usable(&self, db: &Path) -> bool {
+        db.exists() && git::is_git_dir(db).unwrap_or(false)
+    }
+
     /// Ensure a checkout for `(url, rev)` exists and return its path. Reuses
     /// an existing checkout; exports from the db otherwise.
+    ///
+    /// The reuse check comes *first*. It used to follow `ensure_db`, which fetches
+    /// unconditionally, so the fast path could never rescue an offline run -- and
+    /// the README's claim that a resolved project "works offline" was false for
+    /// `install`, `update`, `add` and `lock`.
     pub fn ensure_checkout(&self, url: &str, rev: &str) -> Result<PathBuf> {
-        let db = self.ensure_db(url)?;
         let co = self.checkout_dir(url, rev);
-        if co.join(".git").exists() && co.join(crate::MANIFEST_FILE).exists() {
+        if co.join(crate::MANIFEST_FILE).is_file() {
+            // Everything needed is already on disk: no network, and in particular no
+            // fetch. This is what makes an offline install possible.
             return Ok(co);
         }
+        let db = self.ensure_db(url)?;
         git::export_tree(&db, rev, &co)?;
         Ok(co)
     }

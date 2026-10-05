@@ -60,6 +60,20 @@ pub fn fetch(db: &Path) -> Result<()> {
         .map(|_| ())
         .with_context(|| format!("fetching {}", db.display()))
 }
+/// Whether `dir` is a git repository git can operate on.
+///
+/// Used to decide whether a cached clone is usable. Asking git is the only reliable
+/// test: probing for a `HEAD` file gets bare repositories wrong, and cannot
+/// distinguish a finished clone from one that was interrupted.
+pub fn is_git_dir(dir: &Path) -> Result<bool> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .arg("rev-parse")
+        .arg("--git-dir")
+        .output()
+        .with_context(|| format!("probing {}", dir.display()))?;
+    Ok(out.status.success())
+}
 
 /// List `v*` tags sorted newest-first by version.
 pub fn list_tags(db: &Path) -> Result<Vec<String>> {
