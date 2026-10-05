@@ -22,8 +22,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-use crate::OYVEY_HOME_ENV;
 use crate::git;
+use crate::OYVEY_HOME_ENV;
 
 /// The global cache handle.
 pub struct Cache {

@@ -56,21 +56,19 @@ pub fn clone_bare(url: &str, dest: &Path) -> Result<()> {
 
 /// Fetch all tags (and the default branch) into an existing bare db.
 pub fn fetch(db: &Path) -> Result<()> {
-    git(
-        Some(db),
-        &["fetch", "--tags", "--force", "origin"],
-    )
-    .map(|_| ())
-    .with_context(|| format!("fetching {}", db.display()))
+    git(Some(db), &["fetch", "--tags", "--force", "origin"])
+        .map(|_| ())
+        .with_context(|| format!("fetching {}", db.display()))
 }
 
 /// List `v*` tags sorted newest-first by version.
 pub fn list_tags(db: &Path) -> Result<Vec<String>> {
-    let out = git(
-        Some(db),
-        &["tag", "--list", "v*", "--sort=-v:refname"],
-    )?;
-    Ok(out.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+    let out = git(Some(db), &["tag", "--list", "v*", "--sort=-v:refname"])?;
+    Ok(out
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 /// Resolve the default-branch HEAD commit of a bare db.
@@ -102,8 +100,7 @@ pub fn rev_exists(db: &Path, rev: &str) -> Result<bool> {
 /// itself instead.
 pub fn export_tree(db: &Path, rev: &str, dest: &Path) -> Result<()> {
     if dest.exists() {
-        std::fs::remove_dir_all(dest)
-            .with_context(|| format!("clearing {}", dest.display()))?;
+        std::fs::remove_dir_all(dest).with_context(|| format!("clearing {}", dest.display()))?;
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -123,11 +120,8 @@ pub fn export_tree(db: &Path, rev: &str, dest: &Path) -> Result<()> {
         ],
     )
     .with_context(|| format!("cloning {} into {}", db.display(), dest.display()))?;
-    git(
-        Some(dest),
-        &["checkout", "--quiet", "--detach", rev],
-    )
-    .with_context(|| format!("checking out {} in {}", rev, dest.display()))?;
+    git(Some(dest), &["checkout", "--quiet", "--detach", rev])
+        .with_context(|| format!("checking out {} in {}", rev, dest.display()))?;
     Ok(())
 }
 

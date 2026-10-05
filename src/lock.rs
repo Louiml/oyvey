@@ -94,9 +94,9 @@ pub fn load_lock(path: &Path) -> Result<LockFile> {
     if !path.exists() {
         return Ok(LockFile::default());
     }
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let lock: LockFile = toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+    let s = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let lock: LockFile =
+        toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
     Ok(lock)
 }
 

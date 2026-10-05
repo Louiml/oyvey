@@ -75,7 +75,10 @@ fn version_and_help_succeed() {
     let o = run(t.path(), t.path(), &["help"]);
     assert!(o.status.success());
     let s = stdout(&o);
-    for expected in ["new", "init", "add", "remove", "install", "update", "build", "run", "test", "clean", "list"] {
+    for expected in [
+        "new", "init", "add", "remove", "install", "update", "build", "run", "test", "clean",
+        "list",
+    ] {
         assert!(s.contains(expected), "help missing `{}`:\n{}", expected, s);
     }
 
@@ -95,7 +98,9 @@ fn unknown_command_exits_nonzero() {
 #[test]
 fn commands_without_a_project_report_a_clear_error() {
     let t = Tmp::new("noproject");
-    for cmd in ["install", "run", "build", "test", "list", "tree", "audit", "update"] {
+    for cmd in [
+        "install", "run", "build", "test", "list", "tree", "audit", "update",
+    ] {
         let o = run(t.path(), t.path(), &[cmd]);
         assert!(!o.status.success(), "{} should fail without a project", cmd);
         let e = stderr(&o);
@@ -124,11 +129,7 @@ fn new_scaffolds_a_runnable_project() {
         ".gitignore",
         "README.md",
     ] {
-        assert!(
-            proj.join(f).is_file(),
-            "oyvey new should create {}",
-            f
-        );
+        assert!(proj.join(f).is_file(), "oyvey new should create {}", f);
     }
 
     // The manifest names the project and points at a real entry point.
@@ -152,7 +153,10 @@ fn new_refuses_to_clobber_a_non_empty_directory() {
 
     let o = run(t.path(), &home, &["new", "demo"]);
     assert!(!o.status.success(), "should refuse a non-empty directory");
-    assert!(proj.join("keep.txt").is_file(), "must not delete existing files");
+    assert!(
+        proj.join("keep.txt").is_file(),
+        "must not delete existing files"
+    );
 }
 
 #[test]
@@ -215,7 +219,10 @@ fn lock_writes_an_empty_lockfile_for_a_dep_free_project() {
     assert!(o.status.success(), "{}", stderr(&o));
     let lock = std::fs::read_to_string(proj.join("oyvey.lock")).unwrap();
     assert!(lock.contains("version = 1"), "{}", lock);
-    assert!(lock.contains("@generated"), "lockfile should be marked generated");
+    assert!(
+        lock.contains("@generated"),
+        "lockfile should be marked generated"
+    );
 }
 
 #[test]

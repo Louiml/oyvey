@@ -1,5 +1,9 @@
 name: Release
 
+# Runs on a `v*` tag. The tag is the version: the asset names carry the
+# OS/arch suffix that `rak-setup` asks for, and the tag is recorded on the
+# release so a given build can be traced back to the commit that produced it.
+
 on:
   push:
     tags: ['v*']
@@ -10,17 +14,26 @@ permissions:
 
 jobs:
   linux:
+    name: linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Test
-        run: cargo test
+        # `--lib --tests`: doc-tests need rustdoc, which the minimal toolchain
+        # profile does not provide.
+        run: cargo test --lib --tests --no-fail-fast
       - name: Build
         run: cargo build --release --bin oyvey
+      - name: Smoke-test the binary
+        run: |
+          ./target/release/oyvey --version
+          ./target/release/oyvey help
+          ./target/release/oyvey new smoke
       - name: Stage
         run: |
+          set -e
           mkdir -p staging
           cp target/release/oyvey staging/oyvey-linux-x86_64
           chmod +x staging/oyvey-linux-x86_64
@@ -30,6 +43,7 @@ jobs:
           files: staging/oyvey-linux-x86_64
 
   windows:
+    name: windows
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +51,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release --bin oyvey
+      - name: Smoke-test the binary
+        shell: pwsh
+        run: |
+          .\target\release\oyvey.exe --version
+          .\target\release\oyvey.exe help
+          .\target\release\oyvey.exe new smoke
       - name: Stage
         shell: pwsh
         run: |

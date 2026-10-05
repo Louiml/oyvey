@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::lock::LockFile;
-use crate::manifest::{Manifest, MANIFEST_FILE, ENTRY_DEFAULT, ENTRY_LIB};
+use crate::manifest::{Manifest, ENTRY_DEFAULT, ENTRY_LIB, MANIFEST_FILE};
 use crate::resolve::Resolved;
 use crate::{LOCK_FILE, PACKAGES_DIR};
 
@@ -48,12 +48,10 @@ pub fn lock_path(root: &Path) -> PathBuf {
 /// vendored packages that are no longer dependencies are removed.
 pub fn vendor_packages(root: &Path, resolved: &[Resolved]) -> Result<()> {
     let dir = packages_dir(root);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
     // Remove vendored packages no longer in the resolve set.
-    let keep: std::collections::HashSet<&str> =
-        resolved.iter().map(|r| r.name.as_str()).collect();
+    let keep: std::collections::HashSet<&str> = resolved.iter().map(|r| r.name.as_str()).collect();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -118,18 +116,14 @@ fn write_entry_shim(dest: &Path, manifest: &Manifest) -> Result<()> {
          pub from \"./{}\" import *\n",
         MANIFEST_FILE, entry, manifest.name, entry
     );
-    std::fs::write(&shim, body)
-        .with_context(|| format!("writing {}", shim.display()))?;
+    std::fs::write(&shim, body).with_context(|| format!("writing {}", shim.display()))?;
     Ok(())
 }
 
 /// Recursively copy `src` into `dst`, skipping `.git`.
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("creating {}", dst.display()))?;
-    for entry in std::fs::read_dir(src)
-        .with_context(|| format!("reading {}", src.display()))?
-    {
+    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         if name == ".git" {
@@ -149,11 +143,14 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 
 /// Generate a brand-new project at `path` with `oyvey new`.
 pub fn scaffold_new(path: &Path, name: &str, lib: bool) -> Result<()> {
-    if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
+    if path.exists()
+        && std::fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    {
         bail!("directory {} is not empty", path.display());
     }
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
 
     let entry = if lib { ENTRY_LIB } else { ENTRY_DEFAULT };
     let entry_path = path.join(entry);
@@ -249,9 +246,10 @@ fn readme_template(name: &str) -> String {
 /// Load the manifest for a project root.
 pub fn load_manifest(root: &Path) -> Result<Manifest> {
     let path = root.join(MANIFEST_FILE);
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    crate::manifest::parse_manifest_str(&content).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    crate::manifest::parse_manifest_str(&content)
+        .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))
 }
 
 /// Load the lockfile for a project root (empty if missing).

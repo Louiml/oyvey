@@ -57,8 +57,8 @@ impl Default for Manifest {
 
 /// Parse a `package.rak` manifest from disk.
 pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
     parse_manifest_str(&content)
 }
 
@@ -138,7 +138,13 @@ fn unquote(s: &str) -> String {
 
 /// Candidate entry points, most specific first, used when a manifest does not
 /// declare one or declares one that is not present.
-const ENTRY_CANDIDATES: [&str; 5] = ["init.rak", "lib.rak", "main.rak", "src/lib.rak", "src/main.rak"];
+const ENTRY_CANDIDATES: [&str; 5] = [
+    "init.rak",
+    "lib.rak",
+    "main.rak",
+    "src/lib.rak",
+    "src/main.rak",
+];
 
 impl Manifest {
     /// The entry point to actually use, given the directory the manifest is in.

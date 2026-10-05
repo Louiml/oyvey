@@ -145,10 +145,7 @@ impl<'a> Resolver<'a> {
             return Ok(rev.clone());
         }
         if let Some(entry) = self.lock.get(name) {
-            let locked_url = entry
-                .source
-                .strip_prefix("git+")
-                .unwrap_or(&entry.source);
+            let locked_url = entry.source.strip_prefix("git+").unwrap_or(&entry.source);
             let (locked_base, locked_rev) = match locked_url.rsplit_once('#') {
                 Some((base, rev)) => (base, rev),
                 None => (locked_url, ""),
@@ -167,7 +164,8 @@ impl<'a> Resolver<'a> {
     fn fresh_rev(&self, spec: &DepSpec, url: &str) -> Result<String> {
         let db = self.cache.ensure_db(url)?;
         let constraint = spec.constraint.as_deref().unwrap_or("");
-        let tags = git::list_tags(&db).with_context(|| format!("listing tags for {}", spec.repo))?;
+        let tags =
+            git::list_tags(&db).with_context(|| format!("listing tags for {}", spec.repo))?;
         if let Some(tag) = tags
             .iter()
             .find(|t| version_satisfies(t.trim_start_matches('v'), constraint))

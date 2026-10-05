@@ -94,10 +94,7 @@ fn commit_package(dir: &Path, name: &str, version: &str, tags: &[(&str, &str)]) 
     .expect("write manifest");
     std::fs::write(
         dir.join("lib.rak"),
-        format!(
-            "pub fn value() -> string {{\n    return \"{}\"\n}}\n",
-            name
-        ),
+        format!("pub fn value() -> string {{\n    return \"{}\"\n}}\n", name),
     )
     .expect("write lib");
     git(dir, &["add", "-A"]);
@@ -154,7 +151,10 @@ impl World {
     /// Resolve `(name, url, constraint)` triples against the cache and vendor
     /// the result. The URL is used directly, so tests can point at local
     /// repositories without going through GitHub.
-    fn install_url(&self, deps: &[(&str, &str, &str)]) -> (Vec<oyvey::resolve::Resolved>, LockFile) {
+    fn install_url(
+        &self,
+        deps: &[(&str, &str, &str)],
+    ) -> (Vec<oyvey::resolve::Resolved>, LockFile) {
         let mut m = self.manifest("root", &[]);
         for (name, url, constraint) in deps {
             // A constraint is separated by `@`, except a `#rev` pin, which is
@@ -207,10 +207,7 @@ fn resolves_tag_and_vendors_with_lockfile() {
     // Vendored copy exists and its manifest checksum matches the lockfile.
     let vendored = packages_dir(&w.root).join("mylib").join("package.rak");
     assert!(vendored.is_file(), "package should be vendored");
-    assert_eq!(
-        sha256_file(&vendored),
-        lock.get("mylib").unwrap().checksum
-    );
+    assert_eq!(sha256_file(&vendored), lock.get("mylib").unwrap().checksum);
 }
 
 #[test]
@@ -268,7 +265,9 @@ fn no_matching_tag_is_an_error() {
 
     let lock = LockFile::default();
     let mut resolver = Resolver::new(&w.cache, &lock);
-    let err = resolver.resolve_root(&m).expect_err("should not resolve ^9");
+    let err = resolver
+        .resolve_root(&m)
+        .expect_err("should not resolve ^9");
     let msg = format!("{:#}", err);
     assert!(
         msg.contains("satisfies") && msg.contains("9"),
@@ -333,12 +332,18 @@ fn dependency_cycle_terminates() {
     let b_url = url_for(&b);
     std::fs::write(
         a.join("package.rak"),
-        format!("let name = \"a\"\nlet version = \"0.1.0\"\nlet deps = {{ b: \"{}\" }}\n", b_url),
+        format!(
+            "let name = \"a\"\nlet version = \"0.1.0\"\nlet deps = {{ b: \"{}\" }}\n",
+            b_url
+        ),
     )
     .unwrap();
     std::fs::write(
         b.join("package.rak"),
-        format!("let name = \"b\"\nlet version = \"0.1.0\"\nlet deps = {{ a: \"{}\" }}\n", a_url),
+        format!(
+            "let name = \"b\"\nlet version = \"0.1.0\"\nlet deps = {{ a: \"{}\" }}\n",
+            a_url
+        ),
     )
     .unwrap();
     for dir in [&a, &b] {
@@ -395,7 +400,11 @@ fn two_sources_for_one_name_is_a_conflict() {
     let mut resolver = Resolver::new(&w.cache, &lock);
     let err = resolver.resolve_root(&m).expect_err("conflict expected");
     let msg = format!("{:#}", err);
-    assert!(msg.contains("conflict") && msg.contains("shared"), "got: {}", msg);
+    assert!(
+        msg.contains("conflict") && msg.contains("shared"),
+        "got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -412,7 +421,10 @@ fn checkout_in_cache_is_reused() {
     let marker = co.join(".git").join("HEAD");
     let before = std::fs::read_to_string(&marker).expect("read HEAD");
 
-    let co2 = w.cache.ensure_checkout(&url, &r1[0].rev).expect("second checkout");
+    let co2 = w
+        .cache
+        .ensure_checkout(&url, &r1[0].rev)
+        .expect("second checkout");
     assert_eq!(co2, co);
     let after = std::fs::read_to_string(&marker).expect("read HEAD again");
     assert_eq!(before, after, "checkout should be reused, not re-created");

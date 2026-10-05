@@ -46,7 +46,7 @@ pub mod spec;
 
 pub use cache::Cache;
 pub use lock::{LockEntry, LockFile};
-pub use manifest::{Manifest, MANIFEST_FILE, ENTRY_DEFAULT};
+pub use manifest::{Manifest, ENTRY_DEFAULT, MANIFEST_FILE};
 pub use project::{find_project_root, packages_dir, vendor_packages};
 pub use resolve::Resolver;
 pub use spec::{parse_dep_spec, version_satisfies, DepSpec};

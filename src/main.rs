@@ -55,7 +55,9 @@ fn print_usage() {
     println!();
     println!("ENVIRONMENT:");
     println!("  OYVEY_HOME             global cache location (default: ~/.oyvey)");
-    println!("  RAK_PATH               extra module search path (oyvey prepends <project>/packages)");
+    println!(
+        "  RAK_PATH               extra module search path (oyvey prepends <project>/packages)"
+    );
     println!();
     println!("Run `oyvey help <command>` for details on a specific command.");
 }
@@ -230,7 +232,10 @@ fn cmd_new(args: &[String]) -> Result<i32, anyhow::Error> {
     scaffold_new(&path, &proj_name, lib)?;
     println!("Created project: {}", path.display());
     println!("  {} (manifest)", MANIFEST_FILE);
-    println!("  {} (entry point)", if lib { "src/lib.rak" } else { "src/main.rak" });
+    println!(
+        "  {} (entry point)",
+        if lib { "src/lib.rak" } else { "src/main.rak" }
+    );
     println!("  tests/ (tests)");
     println!();
     println!("Next steps:");
@@ -301,7 +306,9 @@ fn cmd_add(args: &[String]) -> Result<i32, anyhow::Error> {
         return Ok(0);
     }
 
-    manifest.deps.insert(pkg_name.clone(), spec.trim().to_string());
+    manifest
+        .deps
+        .insert(pkg_name.clone(), spec.trim().to_string());
     write_manifest(&root, &manifest)?;
     println!("Added {} -> {}", pkg_name, spec.trim());
 
@@ -327,7 +334,10 @@ fn cmd_remove(args: &[String]) -> Result<i32, anyhow::Error> {
 
 /// Resolve a single dependency spec to a `Resolved` (used by `add` to learn
 /// the package name before recording it).
-fn resolve_one(cache: &Cache, dep: &oyvey::spec::DepSpec) -> Result<oyvey::resolve::Resolved, anyhow::Error> {
+fn resolve_one(
+    cache: &Cache,
+    dep: &oyvey::spec::DepSpec,
+) -> Result<oyvey::resolve::Resolved, anyhow::Error> {
     // A one-off manifest with a single dep keyed by the repo name, so the
     // resolver walks it and reports the package's declared name.
     let mut deps = std::collections::BTreeMap::new();
@@ -401,7 +411,11 @@ fn cmd_lock(args: &[String]) -> Result<i32, anyhow::Error> {
     let resolved = resolver.resolve_root(&manifest)?;
     let lock = lockfile_from_resolved(&resolved);
     oyvey::lock::save_lock(&root.join(LOCK_FILE), &lock)?;
-    println!("Wrote {} ({} packages)", root.join(LOCK_FILE).display(), lock.package.len());
+    println!(
+        "Wrote {} ({} packages)",
+        root.join(LOCK_FILE).display(),
+        lock.package.len()
+    );
     Ok(0)
 }
 
@@ -413,7 +427,11 @@ fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
 
     // For a plain install, reuse the lockfile's revisions (reproducible).
     // For update, resolve fresh within constraints.
-    let base_lock = if update { LockFile::default() } else { existing };
+    let base_lock = if update {
+        LockFile::default()
+    } else {
+        existing
+    };
     let mut resolver = Resolver::new(&cache, &base_lock);
     let resolved = resolver.resolve_root(&manifest)?;
 
@@ -425,7 +443,12 @@ fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
         println!("No dependencies to install");
     } else {
         let verb = if update { "Updated" } else { "Installed" };
-        println!("{} {} package(s) into {}", verb, resolved.len(), packages_dir(root).display());
+        println!(
+            "{} {} package(s) into {}",
+            verb,
+            resolved.len(),
+            packages_dir(root).display()
+        );
         println!("Wrote {}", root.join(LOCK_FILE).display());
     }
     Ok(())
@@ -617,8 +640,7 @@ fn cmd_clean(args: &[String]) -> Result<i32, anyhow::Error> {
     for cand in [&exe, &format!("{}.exe", exe)] {
         let p = root.join(cand);
         if p.is_file() {
-            std::fs::remove_file(&p)
-                .with_context(|| format!("removing {}", p.display()))?;
+            std::fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
             println!("Removed {}", p.display());
             removed += 1;
         }
@@ -644,7 +666,14 @@ fn cmd_list(args: &[String]) -> Result<i32, anyhow::Error> {
     }
     println!("Installed packages ({}):", lock.package.len());
     for entry in &lock.package {
-        let short: String = entry.source.rsplit('#').next().unwrap_or("").chars().take(12).collect();
+        let short: String = entry
+            .source
+            .rsplit('#')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(12)
+            .collect();
         println!("  {} v{} ({})", entry.name, entry.version, short);
     }
     Ok(0)
@@ -685,7 +714,9 @@ fn print_tree_entry(
     }
     println!("{}{} v{}", indent, entry.name, entry.version);
     // Read this package's deps from its vendored manifest.
-    let vendored = packages_dir(Path::new(".")).join(&entry.name).join(MANIFEST_FILE);
+    let vendored = packages_dir(Path::new("."))
+        .join(&entry.name)
+        .join(MANIFEST_FILE);
     if let Ok(m) = oyvey::manifest::parse_manifest(&vendored) {
         for sub in m.deps.keys() {
             if let Some(sub_entry) = lock.get(sub) {
@@ -724,7 +755,10 @@ fn cmd_audit(args: &[String]) -> Result<i32, anyhow::Error> {
             println!("[FAIL] {}: checksum mismatch (tampered?)", entry.name);
             issues += 1;
         } else {
-            println!("[ok]   {} v{} (checksum verified)", entry.name, entry.version);
+            println!(
+                "[ok]   {} v{} (checksum verified)",
+                entry.name, entry.version
+            );
         }
     }
     if issues == 0 {
@@ -755,7 +789,12 @@ fn rakc_path() -> Result<String, anyhow::Error> {
     if let Ok(exe) = env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("rakc").to_string_lossy().to_string());
-            candidates.push(parent.join(format!("rakc{}", ext)).to_string_lossy().to_string());
+            candidates.push(
+                parent
+                    .join(format!("rakc{}", ext))
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
     candidates.push(format!("target/release/rakc{}", ext));
@@ -793,8 +832,7 @@ fn write_manifest(root: &Path, manifest: &Manifest) -> Result<(), anyhow::Error>
         out.push_str("}\n");
     }
     let path = root.join(MANIFEST_FILE);
-    std::fs::write(&path, out)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

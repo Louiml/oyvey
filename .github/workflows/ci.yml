@@ -1,0 +1,93 @@
+name: CI
+
+# Oyvey is a package manager, so the thing most worth checking on every push is
+# that it still installs, resolves, and vendors correctly. That is covered by
+# `cargo test` here: `tests/resolve.rs` builds real (local) git repositories and
+# drives the full resolve -> vendor -> lockfile path, and `tests/cli.rs` drives
+# the binary itself.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel a superseded run on the same ref rather than paying for both.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms, because the parts most likely to differ are exactly
+        # the ones a single-platform run cannot see: cache directory names have
+        # to be legal on Windows (a `file://` or `ssh://` source contains a
+        # colon, which Windows refuses in a path), and git needs
+        # `core.longpaths` to write pack files under a deep checkout.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ci-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ci-${{ matrix.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run the test suites
+        # `--lib --tests`, not a bare `cargo test`: doc-tests need rustdoc, which
+        # is not part of the minimal toolchain profile above, so including them
+        # would turn a missing component into a test failure.
+        #
+        # `--no-fail-fast` so every suite is reported even after one fails.
+        # `--test-threads=1` because the resolution tests spawn real `git`
+        # subprocesses against per-test temporary repositories, and serialising
+        # them keeps the output readable and any failure reproducible.
+        run: cargo test --lib --tests --no-fail-fast -- --test-threads=1
+
+  # The release workflow builds a binary users download, so a failure to build
+  # it must not be discovered only when somebody tries to install.
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the release binary
+        run: cargo build --release --bin oyvey
+      - name: Smoke-test the binary
+        run: |
+          oyvey --version
+          oyvey help
+          oyvey new smoke
+          cd smoke
+          oyvey list
