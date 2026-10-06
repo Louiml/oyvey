@@ -56,6 +56,50 @@ impl Default for Manifest {
 }
 
 /// Parse a `package.rak` manifest from disk.
+/// Split on `sep`, ignoring separators inside a quoted string.
+///
+/// The deps object is a comma-separated list, but a version constraint may itself contain
+/// a comma -- `>=1.0, <2.0` is the canonical form and `spec.rs` has always parsed it. A
+/// plain `split(',')` tore such a range in half before the semver code saw it, leaving a
+/// weaker one-sided constraint and silently dropping the rest, so the resolver resolved
+/// against a different constraint than the manifest asked for.
+///
+/// Unquoted separators still split, which is what every ordinary manifest relies on. Both
+/// quote styles are tracked so a comma inside either is left alone, and a trailing escape
+/// does not end the string.
+fn split_top_level(input: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for c in input.chars() {
+        if let Some(q) = quote {
+            cur.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            _ if c == sep => {
+                out.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
 pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
@@ -109,7 +153,7 @@ pub fn parse_manifest_str(content: &str) -> Result<Manifest, String> {
                 .trim_start_matches('{')
                 .trim_end_matches('}')
                 .trim_end_matches(';');
-            for pair in inner.split(',') {
+            for pair in split_top_level(inner, ',') {
                 let pair = pair.trim();
                 if pair.is_empty() {
                     continue;
@@ -225,6 +269,107 @@ mod tests {
         let s = "let name = \"p\"\nlet deps = {\n  a: \"u/a\",\n  b: \"u/b\"\n}\n";
         let m = parse_manifest_str(s).unwrap();
         assert_eq!(m.deps.len(), 2);
+    }
+
+    /// A comparator range must survive the deps split.
+    ///
+    /// `spec.rs` has always understood `>=1.0, <2.0`, but the deps parser split on every
+    /// comma, so the range was torn in half before the semver code saw it. The first half
+    /// became the dependency and the rest was dropped -- a weaker one-sided constraint,
+    /// silently, rather than an error.
+    #[test]
+    fn comma_range_survives_the_deps_split() {
+        let s = "let name = \"p\"\nlet version = \"1.0.0\"\nlet deps = {\n  \"u/a@>=1.0, <2.0\": \"1.5.0\"\n}\n";
+        let m = parse_manifest_str(s).unwrap();
+        assert_eq!(m.deps.len(), 1, "got: {:?}", m.deps);
+        assert_eq!(
+            m.deps.get("u/a@>=1.0, <2.0").map(String::as_str),
+            Some("1.5.0")
+        );
+    }
+
+    /// The same without the space, which split the same way.
+    #[test]
+    fn comma_range_without_a_space_survives() {
+        let s = "let name = \"p\"\nlet deps = {\n  \"u/a@>=1.0,<2.0\": \"1.5.0\"\n}\n";
+        let m = parse_manifest_str(s).unwrap();
+        assert_eq!(m.deps.len(), 1, "got: {:?}", m.deps);
+        assert_eq!(
+            m.deps.get("u/a@>=1.0,<2.0").map(String::as_str),
+            Some("1.5.0")
+        );
+    }
+
+    /// Several ranges in one manifest, alongside a plain dependency.
+    #[test]
+    fn several_ranges_and_plain_deps() {
+        let s = "let name = \"p\"\nlet deps = {\n  \"u/a@>=1.0, <2.0\": \"1.5.0\",\n  \"u/b@^2.0, !=2.5.0\": \"2.4.0\",\n  \"u/c\": \"3.0.0\"\n}\n";
+        let m = parse_manifest_str(s).unwrap();
+        assert_eq!(m.deps.len(), 3, "got: {:?}", m.deps);
+        assert_eq!(
+            m.deps.get("u/a@>=1.0, <2.0").map(String::as_str),
+            Some("1.5.0")
+        );
+        assert_eq!(
+            m.deps.get("u/b@^2.0, !=2.5.0").map(String::as_str),
+            Some("2.4.0")
+        );
+        assert_eq!(m.deps.get("u/c").map(String::as_str), Some("3.0.0"));
+    }
+
+    /// Single quotes are tracked too, so a comma inside one is not a separator.
+    ///
+    /// Rak has no single-quoted *string* form -- `'a'` is a char -- so `unquote` leaves
+    /// these alone and the quotes stay part of the key. That is a separate matter; what
+    /// matters here is that the pair is not torn in half, since a dependency key that
+    /// silently split would be far worse than one that keeps its quotes.
+    #[test]
+    fn a_quoted_range_is_not_torn_in_half() {
+        let s = "let name = \"p\"\nlet deps = {\n  'u/a@>=1.0, <2.0': '1.5.0'\n}\n";
+        let m = parse_manifest_str(s).unwrap();
+        assert_eq!(m.deps.len(), 1, "got: {:?}", m.deps);
+        let (key, value) = m.deps.iter().next().expect("one dependency");
+        assert!(key.contains("<2.0"), "the range was split: {:?}", key);
+        assert_eq!(value, "'1.5.0'", "Rak has no single-quoted string form");
+    }
+
+    /// An escaped quote does not end the string, so the comma after it still counts as
+    /// part of the range.
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string() {
+        let parts = split_top_level(r#""a\"b, >=1.0, <2.0", "c""#, ',');
+        assert_eq!(parts.len(), 2, "got: {:?}", parts);
+        assert!(parts[0].contains("<2.0"), "got: {:?}", parts);
+    }
+
+    /// Unquoted commas still separate, and an empty segment is still skipped.
+    ///
+    /// This is the behaviour every existing manifest depends on, so the fix for quoted
+    /// commas must not change it.
+    #[test]
+    fn unquoted_commas_still_separate() {
+        let m = parse_manifest_str(
+            "let name = \"p\"\nlet deps = { a: \"u/a\", b: \"u/b\", c: \"u/c\" }\n",
+        )
+        .unwrap();
+        assert_eq!(m.deps.len(), 3, "got: {:?}", m.deps);
+        assert_eq!(m.deps.get("b").map(String::as_str), Some("u/b"));
+
+        // A trailing comma leaves an empty segment, which the caller skips.
+        let parts = split_top_level("a, b,", ',');
+        assert_eq!(parts, vec!["a", " b", ""]);
+    }
+
+    /// A revision pin alongside a range keeps working.
+    #[test]
+    fn a_range_with_a_revision_pin() {
+        let s = "let name = \"p\"\nlet deps = {\n  \"u/a@>=1.0, <2.0#deadbeef\": \"1.5.0\"\n}\n";
+        let m = parse_manifest_str(s).unwrap();
+        assert_eq!(m.deps.len(), 1, "got: {:?}", m.deps);
+        let spec =
+            crate::spec::parse_dep_spec(m.deps.keys().next().expect("one dependency").as_str());
+        assert_eq!(spec.constraint.as_deref(), Some(">=1.0, <2.0"));
+        assert_eq!(spec.rev.as_deref(), Some("deadbeef"));
     }
 
     #[test]
