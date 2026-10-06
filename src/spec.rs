@@ -300,7 +300,17 @@ pub fn version_satisfies(actual: &str, constraint: &str) -> bool {
 pub fn check_version(actual: &str, constraint: &str) -> Result<bool, String> {
     let c = constraint.trim();
     if c.is_empty() || c == "*" || c == "x" || c == "X" {
-        return Ok(true);
+        // `*` means any *release*, not any tag. This used to return `true` outright,
+        // which put `*` above the pre-release rule below rather than through it -- so
+        // `@*` was the one constraint that would select `1.1.0-rc.1`, while `@^1.0`
+        // correctly would not. That is the most likely constraint to pull an rc by
+        // accident, since it is what someone writes when they mean "whatever is
+        // current".
+        //
+        // Asked as "is this a pre-release" rather than by parsing first, so a tag form
+        // that fails to parse still matches `*` exactly as it did before.
+        let is_pre = Version::parse(actual).is_some_and(|v| v.is_pre_release());
+        return Ok(!is_pre);
     }
 
     let version = Version::parse(actual)
@@ -434,6 +444,76 @@ mod tests {
     fn wildcards() {
         assert!(version_satisfies("1.2.9", "1.2.*"));
         assert!(!version_satisfies("1.3.0", "1.2.*"));
+    }
+
+    /// `*` means any release, not any tag.
+    ///
+    /// The wildcard short-circuited before the version was parsed, so it sat *above* the
+    /// pre-release rule rather than through it. `@*` was the one constraint that would
+    /// install an rc, while `@^1.0` correctly would not -- and `@*` is exactly what
+    /// someone writes when they mean "whatever is current", so it is the most likely
+    /// constraint to pull one by accident.
+    #[test]
+    fn a_wildcard_does_not_select_a_pre_release() {
+        for constraint in ["*", "x", "X", ""] {
+            assert!(
+                !version_satisfies("1.1.0-rc.1", constraint),
+                "{:?} should not match a pre-release",
+                constraint
+            );
+            assert!(
+                !version_satisfies("2.0.0-beta.2", constraint),
+                "{:?} should not match a pre-release",
+                constraint
+            );
+            // A plain release is still what `*` is for.
+            assert!(
+                version_satisfies("1.0.0", constraint),
+                "{:?} should match a release",
+                constraint
+            );
+        }
+    }
+
+    /// Every constraint form now agrees about pre-releases.
+    ///
+    /// The inconsistency is the point: `@*` and `@^1.0` answering differently about the
+    /// same tag is invisible until it installs the wrong thing.
+    #[test]
+    fn every_constraint_form_agrees_about_pre_releases() {
+        let pre = "1.1.0-rc.1";
+        for constraint in ["*", "^1.0", "~1.1", ">=1.0, <2.0", ">=1.0.0, <2.0.0"] {
+            assert!(
+                !version_satisfies(pre, constraint),
+                "{:?} should exclude {}",
+                constraint,
+                pre
+            );
+        }
+    }
+
+    /// Naming a pre-release still works.
+    ///
+    /// Excluding them by default is only safe if there is a way to ask for one, and the
+    /// existing rule already allowed a constraint naming the same major.minor.patch.
+    #[test]
+    fn a_named_pre_release_is_still_selectable() {
+        assert!(version_satisfies("1.1.0-rc.1", "1.1.0-rc.1"));
+        assert!(version_satisfies("1.1.0-rc.1", ">=1.1.0-rc.1, <2.0.0"));
+        // ...and only for that exact version.
+        assert!(!version_satisfies("1.1.0-rc.2", "1.1.0-rc.1"));
+        assert!(!version_satisfies("1.2.0-rc.1", ">=1.1.0-rc.1, <2.0.0"));
+    }
+
+    /// A version `Version::parse` cannot read still matches `*`.
+    ///
+    /// The fix asks "is this a pre-release" rather than parsing first, precisely so no tag
+    /// form that used to resolve stops resolving. Without this the change would trade one
+    /// silent selection for a hard failure.
+    #[test]
+    fn an_unparseable_version_still_matches_a_wildcard() {
+        assert!(version_satisfies("not-a-version", "*"));
+        assert!(version_satisfies("", "*"));
     }
 
     /// `1.0.0-alpha` used to parse as `1.0.0`, so a pre-release tag could
