@@ -256,6 +256,93 @@ fn cmd_init(args: &[String]) -> Result<i32, anyhow::Error> {
     Ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------------
+
+/// Network and reproducibility flags, shared by the commands that resolve.
+///
+/// `--offline` forbids fetching anything. `--locked` forbids changing the lockfile.
+/// `--frozen` is both, which is the same pairing Cargo uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Flags {
+    offline: bool,
+    locked: bool,
+    frozen: bool,
+}
+
+impl Flags {
+    fn is_offline(&self) -> bool {
+        self.offline || self.frozen
+    }
+
+    fn is_locked(&self) -> bool {
+        self.locked || self.frozen
+    }
+}
+
+/// Pull the recognised flags out of `args`, returning them with the leftovers.
+///
+/// An unrecognised `-`-prefixed argument is an error naming the accepted flags. Every
+/// command used to accept anything: `oyvey build --release` looked for `rakc` and failed
+/// there, while `oyvey list --bogus` reported success -- so a typo'd flag silently changed
+/// nothing and the user had no way to tell. Silently ignoring an option is the worst
+/// outcome, because the command looks like it honoured it.
+///
+/// Non-flag arguments are returned untouched, so the commands that forward to `rakc`
+/// (`build`, `run`, `test`) still pass through whatever the compiler accepts.
+fn parse_flags<'a>(
+    command: &str,
+    known: &[&str],
+    args: &'a [String],
+) -> Result<(Flags, Vec<&'a String>), anyhow::Error> {
+    let mut flags = Flags::default();
+    let mut rest = Vec::new();
+    let mut accepted: Vec<&str> = known.to_vec();
+    accepted.push("--help");
+    accepted.push("-h");
+
+    for a in args {
+        if !a.starts_with('-') {
+            rest.push(a);
+            continue;
+        }
+        // `--flag=value` is spelled `--flag` for the purposes of recognising it.
+        let name = a.split('=').next().unwrap_or(a.as_str());
+        // `known` is authoritative rather than advisory. An earlier version accepted the
+        // three unconditionally and used the list only to build this message, so
+        // `oyvey list --offline` was accepted and then ignored -- exactly the silence
+        // this replaced.
+        match name {
+            "--help" | "-h" => {
+                print_cmd_help(command);
+                std::process::exit(0);
+            }
+            "--offline" if accepted.contains(&"--offline") => flags.offline = true,
+            "--locked" if accepted.contains(&"--locked") => flags.locked = true,
+            "--frozen" if accepted.contains(&"--frozen") => flags.frozen = true,
+            other => anyhow::bail!(
+                "unknown flag '{}' for `oyvey {}` (accepted: {})",
+                other,
+                command,
+                accepted.join(", ")
+            ),
+        }
+    }
+    Ok((flags, rest))
+}
+
+/// Reject anything left over for a command that takes no positional arguments.
+///
+/// `install` and friends have nothing to do with a stray argument, so passing one is a
+/// mistake worth reporting rather than ignoring.
+fn reject_extra(command: &str, rest: &[&String]) -> Result<(), anyhow::Error> {
+    match rest.first() {
+        Some(a) => anyhow::bail!("unexpected argument '{}' for `oyvey {}`", a, command),
+        None => Ok(()),
+    }
+}
+
 /// Parse `[--lib] [name]` for new/init. Returns (name, lib).
 fn parse_new_init_args(args: &[String], usage: &str) -> Result<(String, bool), anyhow::Error> {
     let mut lib = false;
@@ -313,7 +400,7 @@ fn cmd_add(args: &[String]) -> Result<i32, anyhow::Error> {
     println!("Added {} -> {}", pkg_name, spec.trim());
 
     // Install (resolves the whole graph, vendors, writes the lockfile).
-    install(&root, false)?;
+    install(&root, false, Flags::default())?;
     Ok(0)
 }
 
@@ -328,7 +415,7 @@ fn cmd_remove(args: &[String]) -> Result<i32, anyhow::Error> {
     println!("Removed {} from {}", name, MANIFEST_FILE);
 
     // Re-resolve to prune the lockfile and stale vendored copies.
-    install(&root, false)?;
+    install(&root, false, Flags::default())?;
     Ok(0)
 }
 
@@ -429,41 +516,30 @@ fn dep_repo_string(dep: &oyvey::spec::DepSpec) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_install(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("install");
-            return Ok(0);
-        }
-    }
+    let (flags, rest) = parse_flags("install", &["--offline", "--locked", "--frozen"], args)?;
+    reject_extra("install", &rest)?;
     let root = find_project_root(Path::new("."))?;
-    install(&root, false)?;
+    install(&root, false, flags)?;
     Ok(0)
 }
 
 fn cmd_update(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("update");
-            return Ok(0);
-        }
-    }
+    let (flags, rest) = parse_flags("update", &["--offline", "--locked", "--frozen"], args)?;
+    reject_extra("update", &rest)?;
     let root = find_project_root(Path::new("."))?;
-    install(&root, true)?;
+    install(&root, true, flags)?;
     Ok(0)
 }
 
 fn cmd_lock(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("lock");
-            return Ok(0);
-        }
-    }
+    let (flags, rest) = parse_flags("lock", &["--offline", "--locked", "--frozen"], args)?;
+    reject_extra("lock", &rest)?;
     let root = find_project_root(Path::new("."))?;
     let manifest = load_manifest(&root)?;
     let cache = Cache::open()?;
     let lock = LockFile::default();
     let mut resolver = Resolver::new(&cache, &lock);
+    resolver.set_offline(flags.is_offline());
     let resolved = resolver.resolve_root(&manifest)?;
     let lock = lockfile_from_resolved(&resolved);
     oyvey::lock::save_lock(&root.join(LOCK_FILE), &lock)?;
@@ -476,7 +552,7 @@ fn cmd_lock(args: &[String]) -> Result<i32, anyhow::Error> {
 }
 
 /// Resolve + vendor + write the lockfile. `update` ignores locked revisions.
-fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
+fn install(root: &Path, update: bool, flags: Flags) -> Result<(), anyhow::Error> {
     let manifest = load_manifest(root)?;
     // Propagated, not defaulted: a present-but-unreadable lockfile is an error by
     // `load_lock`'s own contract. Defaulting here meant a truncated or
@@ -486,20 +562,71 @@ fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
     let existing = load_lock(root)?;
     let cache = Cache::open()?;
 
+    // `--locked`/`--frozen` promise the lockfile will not change, so it has to be present
+    // and have to describe what the manifest asks for. Resolving first and comparing the
+    // result afterwards would do the network work the flag is meant to avoid, and would
+    // report a difference only after having already fetched.
+    // `--locked` promises the lockfile will not change, so it has to already describe
+    // what the manifest asks for. Checking the *manifest* rather than "is the lockfile
+    // empty" matters: a project with no dependencies has an empty lockfile and is still
+    // perfectly locked.
+    if flags.is_locked() && !lock_is_usable(root, &manifest, &existing) {
+        let missing: Vec<String> = manifest
+            .deps
+            .keys()
+            .filter(|name| existing.get(name).is_none())
+            .cloned()
+            .collect();
+        let detail = if missing.is_empty() {
+            format!(
+                "{} does not satisfy {}",
+                root.join(LOCK_FILE).display(),
+                root.join("package.rak").display()
+            )
+        } else {
+            format!(
+                "{} has no entry for {}",
+                root.join(LOCK_FILE).display(),
+                missing.join(", ")
+            )
+        };
+        anyhow::bail!(
+            "`--locked` requires an up-to-date lockfile, but {}. Run without `--locked` to update it.",
+            detail
+        );
+    }
+
     // For a plain install, reuse the lockfile's revisions (reproducible).
     // For update, resolve fresh within constraints.
     let base_lock = if update {
         LockFile::default()
     } else {
-        existing
+        existing.clone()
     };
     let mut resolver = Resolver::new(&cache, &base_lock);
+    if flags.is_offline() {
+        resolver.set_offline(true);
+    }
     let mut resolved = resolver.resolve_root(&manifest)?;
 
     // `vendor_packages` fills in each package's checksum, so the lockfile written below
     // covers the vendored tree rather than the cache checkout.
     vendor_packages(root, &mut resolved)?;
     let lock = lockfile_from_resolved(&resolved);
+
+    // Checked before the write, so a `--locked` run that would have changed the lockfile
+    // leaves the file alone and the build reproducible.
+    if flags.is_locked() {
+        if let Some(difference) = lockfile_difference(&existing, &lock) {
+            anyhow::bail!(
+                "`--locked` would change {}: {}. Run without `--locked` to accept it.",
+                root.join(LOCK_FILE).display(),
+                difference
+            );
+        }
+        println!("Lockfile is up to date (--locked)");
+        return Ok(());
+    }
     oyvey::lock::save_lock(&root.join(LOCK_FILE), &lock)?;
 
     if resolved.is_empty() {
@@ -515,6 +642,44 @@ fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
         println!("Wrote {}", root.join(LOCK_FILE).display());
     }
     Ok(())
+}
+
+/// The first way `want` differs from `have`, or `None` when they agree.
+///
+/// Compares the resolved set rather than the file text, so reordering or reformatting is
+/// not reported as a change -- only a package, version, source, or checksum that actually
+/// differs.
+fn lockfile_difference(have: &LockFile, want: &LockFile) -> Option<String> {
+    for entry in &want.package {
+        match have.get(&entry.name) {
+            None => return Some(format!("{} is not in the lockfile", entry.name)),
+            Some(current) if current.version != entry.version => {
+                return Some(format!(
+                    "{} is locked at {} but resolves to {}",
+                    entry.name, current.version, entry.version
+                ))
+            }
+            Some(current) if current.source != entry.source => {
+                return Some(format!(
+                    "{} is locked at {} but resolves to {}",
+                    entry.name, current.source, entry.source
+                ))
+            }
+            Some(current) if current.checksum != entry.checksum => {
+                return Some(format!(
+                    "{} has a different checksum than recorded",
+                    entry.name
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    for entry in &have.package {
+        if want.get(&entry.name).is_none() {
+            return Some(format!("{} would be removed", entry.name));
+        }
+    }
+    None
 }
 
 fn lockfile_from_resolved(resolved: &[oyvey::resolve::Resolved]) -> LockFile {
@@ -568,12 +733,13 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
 }
 
 fn cmd_build(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("build");
-            return Ok(0);
-        }
-    }
+    // `--offline` is oyvey's, so it is stripped here rather than forwarded: the
+    // compiler would reject it as an unknown flag.
+    let forwarded: Vec<String> = parse_flags("build", &["--offline"], args)?
+        .1
+        .into_iter()
+        .map(|a| a.to_string())
+        .collect();
     let root = find_project_root(Path::new("."))?;
     ensure_deps(&root)?;
     let manifest = load_manifest(&root)?;
@@ -590,18 +756,19 @@ fn cmd_build(args: &[String]) -> Result<i32, anyhow::Error> {
     // oyvey does not repeat it here.
     // Forwarded so a flag aimed at rakc reaches it instead of being dropped.
     let mut argv = vec!["build".to_string(), entry.clone()];
-    argv.extend(child_args(args));
+    argv.extend(child_args(&forwarded));
     let status = invoke_rakc(&root, &rakc, &argv)?;
     Ok(exit_code_of(&status))
 }
 
 fn cmd_run(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("run");
-            return Ok(0);
-        }
-    }
+    // `--offline` is oyvey's, so it is stripped here rather than forwarded: the
+    // compiler would reject it as an unknown flag.
+    let forwarded: Vec<String> = parse_flags("run", &["--offline"], args)?
+        .1
+        .into_iter()
+        .map(|a| a.to_string())
+        .collect();
     let root = find_project_root(Path::new("."))?;
     ensure_deps(&root)?;
     let manifest = load_manifest(&root)?;
@@ -618,25 +785,26 @@ fn cmd_run(args: &[String]) -> Result<i32, anyhow::Error> {
     // `oyvey new` project always received an empty array -- which is exactly what
     // oyvey's own scaffold template and `docs/content/cli.md` promise it gets.
     let mut argv = vec!["run".to_string(), entry.clone()];
-    argv.extend(child_args(args));
+    argv.extend(child_args(&forwarded));
     let status = invoke_rakc(&root, &rakc, &argv)?;
     Ok(exit_code_of(&status))
 }
 
 fn cmd_test(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("test");
-            return Ok(0);
-        }
-    }
+    // `--offline` is oyvey's, so it is stripped here rather than forwarded: the
+    // compiler would reject it as an unknown flag.
+    let forwarded: Vec<String> = parse_flags("test", &["--offline"], args)?
+        .1
+        .into_iter()
+        .map(|a| a.to_string())
+        .collect();
     let root = find_project_root(Path::new("."))?;
     // When no flags were passed, discover the suite the same way `rakc test`
     // does and bail out with a clear message if the project has none. Left to
     // rakc it falls back to `test.rak`, which for a project without one is a
     // read error reported as a failing test.
     let mut files: Vec<String> = Vec::new();
-    let mut forwarded_flags: Vec<String> = args.to_vec();
+    let mut forwarded_flags: Vec<String> = forwarded;
     if args.iter().all(|a| a == "--help" || a == "-h") {
         forwarded_flags.clear();
     }
@@ -687,7 +855,7 @@ fn ensure_deps(root: &Path) -> Result<(), anyhow::Error> {
     if lock_is_usable(root, &manifest, &lock) {
         return Ok(());
     }
-    install(root, false)
+    install(root, false, Flags::default())
 }
 
 /// Whether the lockfile and `packages/` still satisfy the manifest.
@@ -762,12 +930,8 @@ fn build_output_name(entry: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_clean(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("clean");
-            return Ok(0);
-        }
-    }
+    let (_flags, rest) = parse_flags("clean", &[], args)?;
+    reject_extra("clean", &rest)?;
     let root = find_project_root(Path::new("."))?;
     let manifest = load_manifest(&root)?;
     let exe = build_output_name(&manifest.resolved_entry(&root));
@@ -787,12 +951,8 @@ fn cmd_clean(args: &[String]) -> Result<i32, anyhow::Error> {
 }
 
 fn cmd_list(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("list");
-            return Ok(0);
-        }
-    }
+    let (_flags, rest) = parse_flags("list", &[], args)?;
+    reject_extra("list", &rest)?;
     let root = find_project_root(Path::new("."))?;
     let lock = load_lock(&root)?;
     if lock.package.is_empty() {
@@ -815,12 +975,8 @@ fn cmd_list(args: &[String]) -> Result<i32, anyhow::Error> {
 }
 
 fn cmd_tree(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("tree");
-            return Ok(0);
-        }
-    }
+    let (_flags, rest) = parse_flags("tree", &[], args)?;
+    reject_extra("tree", &rest)?;
     let root = find_project_root(Path::new("."))?;
     let manifest = load_manifest(&root)?;
     let lock = load_lock(&root)?;
@@ -865,12 +1021,8 @@ fn print_tree_entry(
 }
 
 fn cmd_audit(args: &[String]) -> Result<i32, anyhow::Error> {
-    if let Some(a) = args.first() {
-        if a == "--help" || a == "-h" {
-            print_cmd_help("audit");
-            return Ok(0);
-        }
-    }
+    let (_flags, rest) = parse_flags("audit", &[], args)?;
+    reject_extra("audit", &rest)?;
     let root = find_project_root(Path::new("."))?;
     let lock = load_lock(&root)?;
     if lock.package.is_empty() {

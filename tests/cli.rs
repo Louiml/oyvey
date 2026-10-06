@@ -65,6 +65,244 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).to_string()
 }
 
+/// A project directory plus an isolated `OYVEY_HOME`.
+///
+/// Both are temporary and both are per-test, so a test cannot see another's lockfile or
+/// cache -- which matters for `--locked`, where the presence of a lockfile *is* the
+/// subject.
+struct Scratch {
+    dir: Tmp,
+    home: Tmp,
+}
+
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        Scratch {
+            dir: Tmp::new(&format!("{}_dir", tag)),
+            home: Tmp::new(&format!("{}_home", tag)),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// A project with one entry point and no dependencies.
+    fn dep_free(&self) {
+        std::fs::write(
+            self.path().join("package.rak"),
+            "let name = \"p\"\nlet version = \"0.1.0\"\nlet entry = \"main.rak\"\nlet deps = {}\n",
+        )
+        .expect("write manifest");
+        std::fs::write(self.path().join("main.rak"), "fn main() { dump \"hi\" }\n")
+            .expect("write entry");
+    }
+
+    /// A project with one unresolvable dependency, for the lockfile-stale cases.
+    fn with_dep(&self) {
+        std::fs::write(
+            self.path().join("package.rak"),
+            "let name = \"p\"\nlet version = \"0.1.0\"\nlet entry = \"main.rak\"\nlet deps = {\n  thing: \"user/thing@1.0.0\"\n}\n",
+        )
+        .expect("write manifest");
+        std::fs::write(self.path().join("main.rak"), "fn main() { dump \"hi\" }\n")
+            .expect("write entry");
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        run(self.path(), self.home.path(), args)
+    }
+}
+
+/// An unknown flag is an error, not a shrug.
+///
+/// Every command used to accept anything. `oyvey build --release` went looking for `rakc`
+/// and failed there -- so the flag looked like it had been honoured right up until an
+/// unrelated error -- and `oyvey list --bogus` reported success. Silently ignoring an
+/// option is the worst outcome available: the command looks like it did what was asked.
+#[test]
+fn an_unknown_flag_is_rejected() {
+    let s = Scratch::new("flags_unknown");
+    s.dep_free();
+
+    for (command, flag) in [
+        ("install", "--force"),
+        ("update", "--force"),
+        ("lock", "--nope"),
+        ("build", "--release"),
+        ("run", "--fast"),
+        ("test", "--quick"),
+        ("clean", "--all"),
+        ("list", "--bogus"),
+        ("tree", "--xyz"),
+        ("audit", "--x"),
+    ] {
+        let out = s.run(&[command, flag]);
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`oyvey {} {}` should have failed",
+            command,
+            flag
+        );
+        let text = stderr(&out);
+        assert!(
+            text.contains("unknown flag") && text.contains(flag),
+            "`oyvey {} {}` should name the flag, got: {}",
+            command,
+            flag,
+            text
+        );
+    }
+}
+
+/// The rejection lists what the command does accept.
+///
+/// A bare "unknown flag" leaves the user guessing; the accepted set is the useful part of
+/// the message.
+#[test]
+fn the_rejection_lists_the_accepted_flags() {
+    let s = Scratch::new("flags_accepted");
+    s.dep_free();
+
+    let out = s.run(&["install", "--bogus"]);
+    let text = stderr(&out);
+    assert!(text.contains("accepted:"), "got: {}", text);
+    for expected in ["--offline", "--locked", "--frozen"] {
+        assert!(
+            text.contains(expected),
+            "the message should offer {}, got: {}",
+            expected,
+            text
+        );
+    }
+}
+
+/// A stray positional argument is reported by the commands that take none.
+#[test]
+fn a_stray_positional_argument_is_rejected() {
+    let s = Scratch::new("flags_extra");
+    s.dep_free();
+
+    for command in ["list", "tree", "clean", "audit", "install"] {
+        let out = s.run(&[command, "stray"]);
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`oyvey {} stray` should have failed",
+            command
+        );
+        assert!(
+            stderr(&out).contains("unexpected argument"),
+            "`oyvey {} stray`: {}",
+            command,
+            stderr(&out)
+        );
+    }
+}
+
+/// `--offline` succeeds when nothing needs fetching.
+///
+/// The cache was already offline-first, so a project with no dependencies proves the flag
+/// is accepted and harmless without reaching for the network.
+#[test]
+fn offline_succeeds_when_nothing_is_needed() {
+    let s = Scratch::new("flags_offline_ok");
+    s.dep_free();
+
+    let out = s.run(&["install", "--offline"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("No dependencies"), "{}", stdout(&out));
+}
+
+/// `--locked` on a project with no dependencies is trivially satisfied.
+///
+/// Worth a test because the first implementation checked "is the lockfile empty" rather
+/// than "does the lockfile cover the manifest", and so rejected every project with no
+/// dependencies -- the case where there is nothing to lock.
+#[test]
+fn locked_accepts_a_project_with_no_dependencies() {
+    let s = Scratch::new("flags_locked_empty");
+    s.dep_free();
+
+    // Write the lockfile the ordinary way first.
+    let first = s.run(&["install"]);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+
+    for flag in ["--locked", "--frozen"] {
+        let out = s.run(&["install", flag]);
+        assert_eq!(out.status.code(), Some(0), "{}: {}", flag, stderr(&out));
+        assert!(
+            stdout(&out).contains("up to date"),
+            "{}: {}",
+            flag,
+            stdout(&out)
+        );
+    }
+}
+
+/// `--locked` refuses when the lockfile does not cover the manifest, and says which.
+///
+/// This is the point of the flag: a build that quietly updates its own lockfile is not
+/// reproducible, and the failure has to name what is missing to be actionable.
+#[test]
+fn locked_refuses_when_the_lockfile_is_not_usable() {
+    let s = Scratch::new("flags_locked_stale");
+    s.with_dep();
+
+    let out = s.run(&["install", "--locked"]);
+    assert_ne!(out.status.code(), Some(0), "should have refused");
+    let text = stderr(&out);
+    assert!(text.contains("--locked"), "{}", text);
+    assert!(text.contains("thing"), "should name the package: {}", text);
+}
+
+/// `--offline` is not passed on to the compiler.
+///
+/// `build`, `run` and `test` forward their arguments to `rakc`, so an unfiltered list
+/// would hand the compiler a flag it rejects -- turning a working offline build into a
+/// confusing failure inside rakc.
+#[test]
+fn offline_is_not_forwarded_to_the_compiler() {
+    let s = Scratch::new("flags_offline_forward");
+    s.dep_free();
+
+    // rakc is not on PATH here, so a failure is expected; what must not happen is it
+    // being about an unknown `--offline` reaching the compiler.
+    let out = s.run(&["build", "--offline"]);
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !(text.contains("--offline") && text.contains("unknown")),
+        "the compiler should never see --offline: {}",
+        text
+    );
+}
+
+/// `--help` still works, and exits successfully, for every command that takes flags.
+#[test]
+fn help_still_works_everywhere() {
+    let s = Scratch::new("flags_help");
+    s.dep_free();
+
+    for command in [
+        "install", "update", "lock", "build", "run", "test", "clean", "list", "tree", "audit",
+    ] {
+        let out = s.run(&[command, "--help"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "`oyvey {} --help` should succeed: {}",
+            command,
+            stderr(&out)
+        );
+        assert!(
+            !stdout(&out).trim().is_empty(),
+            "`oyvey {} --help` printed nothing",
+            command
+        );
+    }
+}
+
 #[test]
 fn version_and_help_succeed() {
     let t = Tmp::new("help");

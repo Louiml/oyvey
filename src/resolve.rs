@@ -140,6 +140,14 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    /// Put the resolver into offline mode.
+    ///
+    /// The cache is already offline-first, so this mostly matters when something is *not*
+    /// on disk: without this, `--offline` would fetch and be a lie.
+    pub fn set_offline(&self, offline: bool) {
+        self.cache.set_offline(offline);
+    }
+
     /// Determine the exact revision for a spec, preferring the lockfile.
     ///
     /// The lockfile is what makes a build reproducible: if it already records

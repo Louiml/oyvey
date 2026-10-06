@@ -27,6 +27,14 @@ use crate::OYVEY_HOME_ENV;
 
 /// The global cache handle.
 pub struct Cache {
+    /// When set, nothing may be fetched: a missing db or checkout is an error
+    /// rather than a reason to reach the network.
+    ///
+    /// The cache is already offline-first -- `ensure_checkout` returns an existing
+    /// checkout without fetching -- but that only avoids the network when everything
+    /// needed is already on disk. `--offline` has to fail when it is not, rather than
+    /// quietly fetching and making the flag a lie.
+    offline: std::cell::Cell<bool>,
     root: PathBuf,
 }
 
@@ -41,10 +49,25 @@ impl Cache {
     pub fn open_at(root: PathBuf) -> Result<Cache> {
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating cache dir {}", root.display()))?;
-        Ok(Cache { root })
+        Ok(Cache {
+            root,
+            offline: std::cell::Cell::new(false),
+        })
     }
 
     /// The cache root.
+    /// Refuse to fetch anything.
+    ///
+    /// See the field: the cache already avoids the network when a checkout exists, but
+    /// `--offline` has to make the *absence* of a checkout an error instead of a fetch.
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.set(offline);
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.offline.get()
+    }
+
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
@@ -72,6 +95,12 @@ impl Cache {
     /// Ensure the bare db for `url` exists and is up to date, then return its
     /// path. Clones on first use, fetches otherwise.
     pub fn ensure_db(&self, url: &str) -> Result<PathBuf> {
+        if self.is_offline() && !self.db_is_usable(&self.db_dir(url)) {
+            anyhow::bail!(
+                "`--offline` and {} is not in the local cache. Run without `--offline` once to fetch it.",
+                self.db_dir(url).display()
+            );
+        }
         let db = self.db_dir(url);
         if self.db_is_usable(&db) {
             git::fetch(&db)?;
