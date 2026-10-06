@@ -521,13 +521,19 @@ fn checksum_detects_tampering() {
 fn without_git<T>(f: impl FnOnce() -> T) -> T {
     let saved = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ';' } else { ':' };
+    // Drop a PATH entry when it actually holds a `git` executable, rather than when its
+    // *name* mentions git.
+    //
+    // The name test worked on Windows, where git installs to `C:\Program Files\Git\cmd`,
+    // and removed nothing on Linux, where it is `/usr/bin/git` and no PATH entry mentions
+    // git at all. The helper's own assertion then fired -- which is the assertion doing its
+    // job, since without a real absence of git the test proves nothing -- and CI failed on
+    // Ubuntu while passing locally.
+    //
+    // Looking for the executable is the portable question: "would `git` resolve here?"
     let stripped = saved
         .split(sep)
-        .filter(|p| {
-            let low = p.to_ascii_lowercase();
-            // Keep everything that is not a git install directory.
-            !(low.contains("git") && (low.contains("bin") || low.contains("cmd")))
-        })
+        .filter(|p| !holds_git_executable(p))
         .collect::<Vec<_>>()
         .join(&sep.to_string());
     assert_ne!(
@@ -538,6 +544,12 @@ fn without_git<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     std::env::set_var("PATH", saved);
     out
+}
+
+/// Whether `dir` holds an executable named `git`.
+fn holds_git_executable(dir: &str) -> bool {
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    std::path::Path::new(dir).join(name).is_file()
 }
 
 /// A second resolve must not need `git` once everything is vendored.
