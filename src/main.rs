@@ -494,9 +494,11 @@ fn install(root: &Path, update: bool) -> Result<(), anyhow::Error> {
         existing
     };
     let mut resolver = Resolver::new(&cache, &base_lock);
-    let resolved = resolver.resolve_root(&manifest)?;
+    let mut resolved = resolver.resolve_root(&manifest)?;
 
-    vendor_packages(root, &resolved)?;
+    // `vendor_packages` fills in each package's checksum, so the lockfile written below
+    // covers the vendored tree rather than the cache checkout.
+    vendor_packages(root, &mut resolved)?;
     let lock = lockfile_from_resolved(&resolved);
     oyvey::lock::save_lock(&root.join(LOCK_FILE), &lock)?;
 
@@ -877,21 +879,32 @@ fn cmd_audit(args: &[String]) -> Result<i32, anyhow::Error> {
     }
     let mut issues = 0;
     for entry in &lock.package {
-        let manifest_path = packages_dir(&root).join(&entry.name).join(MANIFEST_FILE);
-        if !manifest_path.is_file() {
+        let dir = packages_dir(&root).join(&entry.name);
+        if !dir.join(MANIFEST_FILE).is_file() {
             println!("[WARN] {}: missing (not installed)", entry.name);
             issues += 1;
             continue;
         }
-        let checksum = oyvey::resolve::sha256_file(&manifest_path);
-        if checksum != entry.checksum {
-            println!("[FAIL] {}: checksum mismatch (tampered?)", entry.name);
-            issues += 1;
-        } else {
-            println!(
-                "[ok]   {} v{} (checksum verified)",
-                entry.name, entry.version
-            );
+        // The whole vendored directory, which is what the lockfile records. Verifying only
+        // `package.rak` -- as this did -- meant every other file, including the entry
+        // point, could be changed and audit would still report "checksum verified".
+        match oyvey::resolve::sha256_tree(&dir) {
+            Ok(checksum) if checksum == entry.checksum => {
+                println!(
+                    "[ok]   {} v{} (checksum verified)",
+                    entry.name, entry.version
+                );
+            }
+            Ok(_) => {
+                println!("[FAIL] {}: checksum mismatch (tampered?)", entry.name);
+                issues += 1;
+            }
+            Err(e) => {
+                // Not a mismatch: the files could not be read at all, which is a different
+                // problem and saying "tampered" would misdescribe it.
+                println!("[FAIL] {}: cannot verify: {}", entry.name, e);
+                issues += 1;
+            }
         }
     }
     if issues == 0 {

@@ -46,7 +46,7 @@ pub fn lock_path(root: &Path) -> PathBuf {
 /// Each package is copied fresh from its exported checkout (so a re-install
 /// is deterministic), and the `.git` directory is never copied. Stale
 /// vendored packages that are no longer dependencies are removed.
-pub fn vendor_packages(root: &Path, resolved: &[Resolved]) -> Result<()> {
+pub fn vendor_packages(root: &Path, resolved: &mut [Resolved]) -> Result<()> {
     let dir = packages_dir(root);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
@@ -66,8 +66,15 @@ pub fn vendor_packages(root: &Path, resolved: &[Resolved]) -> Result<()> {
         }
     }
 
-    for r in resolved {
-        let dest = dir.join(&r.name);
+    // Each package's checksum is written back, so this cannot iterate the slice directly
+    // and hold an immutable borrow across the loop. The values are copied out first, which
+    // is also why the index is not the only thing the loop uses.
+    let plan: Vec<(PathBuf, PathBuf, Manifest)> = resolved
+        .iter()
+        .map(|r| (dir.join(&r.name), r.checkout.clone(), r.manifest.clone()))
+        .collect();
+
+    for (i, (dest, checkout, manifest)) in plan.into_iter().enumerate() {
         if dest.exists() {
             std::fs::remove_dir_all(&dest)
                 .with_context(|| format!("replacing {}", dest.display()))?;
@@ -76,9 +83,16 @@ pub fn vendor_packages(root: &Path, resolved: &[Resolved]) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        copy_dir(&r.checkout, &dest)
-            .with_context(|| format!("vendoring {} -> {}", r.checkout.display(), dest.display()))?;
-        write_entry_shim(&dest, &r.manifest)?;
+        copy_dir(&checkout, &dest)
+            .with_context(|| format!("vendoring {} -> {}", checkout.display(), dest.display()))?;
+        write_entry_shim(&dest, &manifest)?;
+
+        // Hash the vendored tree, after the shim exists, so the lockfile describes exactly
+        // what `audit` re-hashes. This is the whole package: the lockfile used to cover
+        // `package.rak` alone, which left every source file -- including the entry point
+        // that actually runs -- unverified.
+        resolved[i].checksum = crate::resolve::sha256_tree(&dest)
+            .with_context(|| format!("checksumming {}", dest.display()))?;
     }
     Ok(())
 }

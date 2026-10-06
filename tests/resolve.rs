@@ -26,7 +26,7 @@ use oyvey::cache::Cache;
 use oyvey::lock::LockFile;
 use oyvey::manifest::Manifest;
 use oyvey::project::{packages_dir, vendor_packages};
-use oyvey::resolve::{sha256_file, Resolver};
+use oyvey::resolve::{sha256_tree, Resolver};
 
 /// A temp directory removed on drop.
 struct Tmp(PathBuf);
@@ -168,10 +168,11 @@ impl World {
         }
         let lock = LockFile::default();
         let mut resolver = Resolver::new(&self.cache, &lock);
-        let resolved = resolver
+        let mut resolved = resolver
             .resolve_root(&m)
             .unwrap_or_else(|e| panic!("resolve: {:#}", e));
-        vendor_packages(&self.root, &resolved).expect("vendor");
+        // Mutable: vendoring is what fills in each package's checksum.
+        vendor_packages(&self.root, &mut resolved).expect("vendor");
         let lock = lockfile_from(&resolved);
         (resolved, lock)
     }
@@ -204,10 +205,17 @@ fn resolves_tag_and_vendors_with_lockfile() {
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].name, "mylib");
     assert_eq!(resolved[0].version, "0.1.0");
-    // Vendored copy exists and its manifest checksum matches the lockfile.
-    let vendored = packages_dir(&w.root).join("mylib").join("package.rak");
-    assert!(vendored.is_file(), "package should be vendored");
-    assert_eq!(sha256_file(&vendored), lock.get("mylib").unwrap().checksum);
+    // Vendored copy exists and its checksum matches the lockfile. This is a *tree*
+    // checksum: the lockfile covers every file in the package, not just its manifest.
+    let vendored = packages_dir(&w.root).join("mylib");
+    assert!(
+        vendored.join("package.rak").is_file(),
+        "package should be vendored"
+    );
+    assert_eq!(
+        sha256_tree(&vendored).unwrap(),
+        lock.get("mylib").unwrap().checksum
+    );
 }
 
 #[test]
@@ -463,14 +471,45 @@ fn checksum_detects_tampering() {
     let url = url_for(&pkg);
     let (_resolved, lock) = w.install_url(&[("lib", &url, "")]);
 
-    let vendored = packages_dir(&w.root).join("lib").join("package.rak");
-    let good = sha256_file(&vendored);
+    let vendored = packages_dir(&w.root).join("lib");
+    // Captured before any edit so each tamper can be undone and the checksum compared
+    // against the same baseline.
+    let original_manifest = std::fs::read_to_string(vendored.join("package.rak")).unwrap();
+    let original_entry = std::fs::read_to_string(vendored.join("lib.rak")).unwrap();
+    let good = sha256_tree(&vendored).unwrap();
     assert_eq!(good, lock.get("lib").unwrap().checksum);
 
-    // Tamper with the vendored manifest.
-    std::fs::write(&vendored, "let name = \"evil\"\n").unwrap();
-    let bad = sha256_file(&vendored);
-    assert_ne!(bad, good, "checksum should detect the edit");
+    // Tampering with the manifest is detected.
+    let manifest = vendored.join("package.rak");
+    std::fs::write(&manifest, "let name = \"evil\"\n").unwrap();
+    let bad = sha256_tree(&vendored).unwrap();
+    assert_ne!(bad, good, "checksum should detect the manifest edit");
+
+    // Restoring it puts the checksum back, so the detection above is the edit and not a
+    // one-way change of what the checksum covers.
+    std::fs::write(&manifest, original_manifest).unwrap();
+    assert_eq!(sha256_tree(&vendored).unwrap(), good);
+
+    // Tampering with a source file is detected too -- this is the gap that made the
+    // checksum cover the manifest only. The manifest is metadata; the entry point is the
+    // code that runs.
+    let entry = vendored.join("lib.rak"); // the entry the manifest declares
+    std::fs::write(&entry, "dump \"evil\"\n").unwrap();
+    assert_ne!(
+        sha256_tree(&vendored).unwrap(),
+        good,
+        "an edit to a source file must change the checksum"
+    );
+    std::fs::write(&entry, original_entry).unwrap();
+    assert_eq!(sha256_tree(&vendored).unwrap(), good);
+
+    // Renaming is detected as well: each file contributes its path, not just its bytes.
+    std::fs::rename(&entry, vendored.join("renamed.rak")).unwrap();
+    assert_ne!(
+        sha256_tree(&vendored).unwrap(),
+        good,
+        "a rename must change the checksum"
+    );
 }
 
 /// Run `f` with `git` removed from `PATH`.
@@ -514,9 +553,9 @@ fn resolving_again_needs_no_git() {
     make_package(&pkg, "mydep", "1.0.0", &[("v1.0.0", "1.0.0")]);
     let url = url_for(&pkg);
 
-    let (resolved, lock) = w.install_url(&[("mydep", &url, "")]);
+    let (mut resolved, lock) = w.install_url(&[("mydep", &url, "")]);
     assert_eq!(resolved.len(), 1);
-    vendor_packages(&w.root, &resolved).expect("vendor");
+    vendor_packages(&w.root, &mut resolved).expect("vendor");
     oyvey::lock::save_lock(&w.root.join("oyvey.lock"), &lock).expect("write lock");
     assert!(
         packages_dir(&w.root).join("mydep").is_dir(),

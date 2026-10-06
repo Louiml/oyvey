@@ -16,7 +16,7 @@
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cache::Cache;
 use crate::git;
@@ -37,7 +37,11 @@ pub struct Resolved {
     pub url: String,
     /// The exact git revision.
     pub rev: String,
-    /// SHA-256 hex of the package's `package.rak`.
+    /// SHA-256 hex of the whole vendored directory.
+    ///
+    /// Filled in by `vendor_packages`, after the entry shim is written -- so it
+    /// describes exactly the tree `oyvey audit` re-hashes. Hashing the cache checkout
+    /// instead produced a different value, because vendoring adds a file.
     pub checksum: String,
     /// The package's own manifest (for transitive deps).
     pub manifest: Manifest,
@@ -107,7 +111,10 @@ impl<'a> Resolver<'a> {
                 e
             )
         })?;
-        let checksum = sha256_file(&manifest_path);
+        // Left empty here and filled in by `vendor_packages`, which is the only place that
+        // knows the final vendored tree. Hashing the cache checkout would produce a value
+        // that never matches what `audit` verifies, because vendoring writes an entry shim.
+        let checksum = String::new();
 
         self.entries.insert(
             name.to_string(),
@@ -211,9 +218,81 @@ impl<'a> Resolver<'a> {
 }
 
 /// SHA-256 hex of a file's contents.
-pub fn sha256_file(path: &Path) -> String {
-    let data = std::fs::read(path).unwrap_or_default();
-    sha256_bytes(&data)
+///
+/// An unreadable file is an error rather than the hash of nothing. `unwrap_or_default`
+/// produced the SHA-256 of an empty byte string, which is the well-known
+/// `e3b0c442...b855` -- a value that appears in the lockfile format documentation as an
+/// example. So a file that could not be read was indistinguishable from an empty one, and
+/// since `audit` compares this against the recorded checksum, an unreadable file could
+/// pass verification.
+pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let data = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", path.display(), e))?;
+    Ok(sha256_bytes(&data))
+}
+
+/// SHA-256 hex of a whole vendored package directory.
+///
+/// The lockfile recorded a hash of `package.rak` and nothing else, so every other file in
+/// the package could be changed -- including the entry point that actually runs -- and
+/// `oyvey audit` would still report "checksum verified". The manifest is metadata; this is
+/// the code.
+///
+/// Each file contributes its path relative to `dir` and its bytes, in sorted path order, so
+/// a rename is detected as well as an edit, and the result does not depend on the order the
+/// filesystem happens to return directory entries in.
+///
+/// Skipped: the lockfile and `oyvey.toml`, which live outside the package, and `.git`,
+/// which is not part of the source. Anything unreadable is an error -- a checksum that
+/// silently covers less than it claims to is worse than none.
+pub fn sha256_tree(dir: &Path) -> anyhow::Result<String> {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    collect_tree_files(dir, dir, &mut entries)?;
+    entries.sort();
+
+    let mut h = Sha256::new();
+    for rel in &entries {
+        h.update(sha256_bytes(rel.to_string_lossy().as_bytes()).as_bytes());
+        let data = std::fs::read(dir.join(rel))
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {}", rel.display(), e))?;
+        h.update(&data);
+    }
+    let out = h.finalize();
+    let mut s = String::with_capacity(64);
+    for b in out {
+        s.push_str(&format!("{:02x}", b));
+    }
+    Ok(s)
+}
+
+/// Collect files under `root`, storing each path relative to `base`.
+fn collect_tree_files(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    let read = std::fs::read_dir(dir)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", dir.display(), e))?;
+    for entry in read {
+        let entry = entry
+            .map_err(|e| anyhow::anyhow!("cannot read an entry in {}: {}", dir.display(), e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("cannot stat {}: {}", path.display(), e))?;
+        if meta.is_dir() {
+            collect_tree_files(base, &path, out)?;
+        } else if meta.is_file() {
+            let rel = path.strip_prefix(base).map_err(|_| {
+                anyhow::anyhow!("{} is not under {}", path.display(), base.display())
+            })?;
+            out.push(rel.to_path_buf());
+        }
+        // A symlink is neither, and is skipped: following one could walk out of the tree,
+        // and hashing the target would make the checksum depend on something the package
+        // does not contain.
+    }
+    Ok(())
 }
 
 /// SHA-256 hex of a byte slice.
