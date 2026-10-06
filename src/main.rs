@@ -106,30 +106,56 @@ fn print_cmd_help(cmd: &str) {
             println!("Resolves every dependency in package.rak (transitively), records the");
             println!("exact revision and checksum in oyvey.lock, and vendors each package");
             println!("into packages/. Honours the lockfile when it is up to date.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!("  --locked    require an up-to-date lockfile; refuse to change it");
+            println!("  --frozen    both --offline and --locked");
         }
         "update" => {
             println!("oyvey update — re-resolve dependencies within constraints");
             println!();
             println!("Ignores the locked revisions and picks the newest version satisfying");
             println!("each constraint, then rewrites oyvey.lock and re-vendors.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!("  --locked    require an up-to-date lockfile; refuse to change it");
+            println!("  --frozen    both --offline and --locked");
         }
         "build" => {
             println!("oyvey build — compile the project through rakc");
             println!();
             println!("Ensures dependencies are installed, then invokes `rakc build` on the");
             println!("entry point to produce a standalone executable.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!();
+            println!("Any other arguments are forwarded to rakc.");
         }
         "run" => {
             println!("oyvey run — run the project entry point");
             println!();
             println!("Ensures dependencies are installed, then invokes `rakc run` on the");
             println!("entry point with RAK_PATH pointing at the vendored packages.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!();
+            println!("Any other arguments are forwarded to the program, after `--` if they");
+            println!("start with a dash.");
         }
         "test" => {
             println!("oyvey test — run the project's tests");
             println!();
             println!("Ensures dependencies are installed, then invokes `rakc test` from the");
             println!("project root with RAK_PATH pointing at the vendored packages.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!();
+            println!("Any other arguments are forwarded to rakc.");
         }
         "clean" => {
             println!("oyvey clean — remove build artifacts");
@@ -149,14 +175,21 @@ fn print_cmd_help(cmd: &str) {
         "audit" => {
             println!("oyvey audit — verify installed packages against the lockfile");
             println!();
-            println!("Checks that every locked package is vendored and that its manifest");
-            println!("checksum matches. Exits non-zero on any mismatch.");
+            println!("Checks that every locked package is vendored and that the SHA-256");
+            println!("over its vendored directory matches the lockfile. Every file counts,");
+            println!("so an edited source file and a renamed one are both detected.");
+            println!("Exits non-zero on a mismatch, or on a file it could not read.")
         }
         "lock" => {
             println!("oyvey lock — write oyvey.lock without installing");
             println!();
             println!("Resolves dependencies and writes the lockfile, but does not vendor");
             println!("packages into packages/.");
+            println!();
+            println!("FLAGS:");
+            println!("  --offline   never touch the network; fail if something is not cached");
+            println!("  --locked    require an up-to-date lockfile; refuse to change it");
+            println!("  --frozen    both --offline and --locked");
         }
         _ => print_usage(),
     }

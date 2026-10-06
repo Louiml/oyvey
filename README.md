@@ -63,7 +63,7 @@ let deps = {
 | `user/repo@^1.2` | caret — compatible with `1.2` |
 | `user/repo@~1.2` | tilde — compatible with `1.2.x` |
 | `user/repo@1.2.3` | exact version |
-| `user/repo@*` | any version |
+| `user/repo@*` | any release (pre-releases need naming) |
 | `user/repo#<rev>` | pin to a git revision (tag, branch, or commit) |
 | `https://host/user/repo` | an explicit URL, for a self-hosted Git server |
 
@@ -75,7 +75,7 @@ is reported as a conflict rather than resolved silently one way.
 ## The lockfile
 
 `oyvey.lock` is TOML. Each package records the revision it was built from and a
-SHA-256 of its manifest:
+SHA-256 over its whole vendored directory:
 
 ```toml
 version = 1
@@ -84,13 +84,19 @@ version = 1
 name = "rak-net"
 version = "0.2.1"
 source = "git+https://github.com/user/rak-net#0123456789abcdef0123456789abcdef01234567"
-checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+checksum = "6f1e2b..."
 ```
+
+The checksum covers every file in the package, each contributing its path and its
+bytes, so an edit to any source file *and* a rename are both detected. It used to
+cover `package.rak` alone, which left the package's actual code -- including the
+entry point that runs -- unverified: an edited dependency still audited as intact.
 
 `oyvey install` reuses the locked revision whenever it still satisfies the
 manifest, which is what makes an install reproducible. `oyvey update`
 re-resolves to the newest matching versions. `oyvey audit` checks the installed
-packages against these checksums.
+packages against these checksums, and reports a file it could not read separately
+from a mismatch, since those are different problems.
 
 ## How imports find a dependency
 
@@ -116,6 +122,23 @@ resolve by name.
 ```
 
 Set `OYVEY_HOME` to move it.
+
+An existing checkout is always reused without invoking git, so a repeated install
+is offline by default. `--offline` makes that a rule rather than an optimisation:
+anything not already on disk is an error instead of a fetch.
+
+```text
+oyvey install --offline   never touch the network
+oyvey install --locked    require an up-to-date lockfile; refuse to change it
+oyvey install --frozen    both of the above
+```
+
+`--locked` is checked before anything is written, and names the package or the
+mismatch that would have changed the lockfile. `install`, `update` and `lock`
+accept all three; `build`, `run` and `test` accept `--offline`.
+
+An unrecognised flag is an error rather than being ignored. Silently dropping an
+option makes the command look like it honoured it, which is worse than failing.
 
 ## Commands
 

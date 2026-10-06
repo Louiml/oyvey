@@ -8,7 +8,10 @@
 //!   allows `0.2.9` but not `0.3.0`.
 //! * `user/repo@~1.2` — tilde: compatible with `1.2.x`, so minor is fixed.
 //! * `user/repo@1.2.3` — exact version.
-//! * `user/repo@1.2.*` — wildcard.
+//! * `user/repo@1.2.*` — wildcard over one component.
+//! * `user/repo@*` — any *release*. A pre-release is only selected
+//!   when the constraint names one, which is the same rule every other
+//!   constraint follows.
 //! * `user/repo@>=1.0, <2.0` — comparator ranges, comma-separated.
 //! * `user/repo#deadbeef` — pin to an exact git revision (tag, branch, or
 //!   commit hash). A `#rev` may be combined with a constraint
